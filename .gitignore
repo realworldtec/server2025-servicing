@@ -1,0 +1,33 @@
+# ---- Large binaries: never commit media or updates ----
+*.iso
+*.wim
+*.esd
+*.msu
+*.cab
+*.vhd
+*.vhdx
+
+# ---- Working/output artifacts ----
+newMedia/
+packages/
+temp/
+DISMscratch/
+wimcheck/
+rtmcheck/
+*.tmp
+
+# ---- Logs & transcripts ----
+logs/
+*.log
+Slipstream_*.log
+Repair_*.log
+DownloadDialog_*.html
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.vscode/
+.idea/
