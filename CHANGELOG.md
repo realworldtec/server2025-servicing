@@ -8,6 +8,44 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [1.2.3] - 2026-07-13
+
+### Changed
+- **`scripts/Watch-Server2025Updates.ps1`** (-> v1.0.4) - widened the Catalog retry budget from
+  **4 x 15s (~1 min)** to **8 x 30s (~4 min)**. The endpoint is demonstrably flaky (transient
+  "Unable to connect to the remote server"), and its DNS returns AAAA records whose IPv6 path is
+  not always routable from a given host. Because a failed poll is non-fatal (exit 0, retry
+  tomorrow), a short blip previously cost a full day of detection latency.
+
+### Notes
+- Investigated a SYSTEM-context failure on the management host. Root cause was **transient
+  network**, not policy: as SYSTEM, DNS/TCP443/HTTPS to the Catalog all succeed; firewall
+  `DefaultOutboundAction = NotConfigured` (allow), no proxy (`ProxyEnable=0`, WinHTTP direct),
+  no security agent. The `-NoProxy` switch added in 1.2.2 remains available but was not the fix.
+
+## [1.2.2] - 2026-07-13
+
+Proxy handling under the SYSTEM account. Symptom: the detector, running as SYSTEM from the
+scheduled task, failed with `Invoke-WebRequest: "Unable to connect to the remote server"` on a
+host with **no proxy in the environment**, while the same request worked interactively.
+
+Cause: `[System.Net.WebRequest]::GetSystemWebProxy()` resolves against the **calling account's**
+WinINET settings. Under SYSTEM that's `HKU\S-1-5-18`, *not* the interactive user's hive — so a
+stale `ProxyEnable`/`ProxyServer` there makes the scripts dial a dead proxy.
+
+### Added
+- **`-NoProxy`** switch on **`Slipstream-Server2025.ps1`** (→ v1.0.3),
+  **`Watch-Server2025Updates.ps1`** (→ v1.0.3) and **`Register-SlipstreamSchedule.ps1`**
+  (→ v1.1.3). Forces `DefaultWebProxy = $null` (direct connection) and skips detection
+  entirely. The detector passes it through to the slipstream, and the registration script
+  bakes it into the task arguments.
+
+### Fixed
+- **`Watch-Server2025Updates.ps1`** now **logs its proxy decision** ("Detected system proxy: X"
+  / "No system proxy detected; using a DIRECT connection"). Previously the detector made the
+  decision silently, so the log gave no way to tell which branch it took — the Slipstream
+  logged this, the detector did not.
+
 ## [1.2.1] - 2026-07-13
 
 ### Changed
@@ -155,7 +193,9 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.1...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.3...HEAD
+[1.2.3]: https://example.com/server2025-servicing/compare/v1.2.2...v1.2.3
+[1.2.2]: https://example.com/server2025-servicing/compare/v1.2.1...v1.2.2
 [1.2.1]: https://example.com/server2025-servicing/compare/v1.2.0...v1.2.1
 [1.2.0]: https://example.com/server2025-servicing/compare/v1.1.1...v1.2.0
 [1.1.1]: https://example.com/server2025-servicing/compare/v1.1.0...v1.1.1

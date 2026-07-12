@@ -28,7 +28,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 1.0.2
+    Version    : 1.0.3
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -60,12 +60,16 @@ param(
     [switch]$ForceDownload,
 
     # Ignore any existing \newMedia and rebuild everything from the source ISO
-    [switch]$Fresh
+    [switch]$Fresh,
+
+    # Force a DIRECT connection - skip system-proxy detection entirely. Use when running as
+    # SYSTEM on a host whose SYSTEM WinINET hive (HKU\S-1-5-18) has a stale proxy configured.
+    [switch]$NoProxy
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '1.0.2'
+$ScriptVersion          = '1.0.3'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -182,20 +186,28 @@ $Script:CAT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Slipstream-Server202
 # Make PowerShell use the same proxy the browser uses. "Unable to connect to the remote
 # server" from Invoke-WebRequest (while a browser CAN reach the site) almost always means
 # a system/WinINET proxy that IWR isn't honouring. Detect it once and reuse everywhere.
+# When running as SYSTEM (scheduled task), GetSystemWebProxy() reads SYSTEM's OWN WinINET hive
+# (HKU\S-1-5-18), not the interactive user's. A stale ProxyEnable there makes us dial a dead
+# proxy -> "Unable to connect to the remote server". -NoProxy forces a direct connection.
 $Script:ProxyArgs = @{}
-try {
-    $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
-    $sysProxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
-    [System.Net.WebRequest]::DefaultWebProxy = $sysProxy
-    $probeUri = [Uri]'https://www.catalog.update.microsoft.com/'
-    $pxy = $sysProxy.GetProxy($probeUri)
-    if ($pxy -and ($pxy.AbsoluteUri.TrimEnd('/') -ne $probeUri.AbsoluteUri.TrimEnd('/'))) {
-        $Script:ProxyArgs = @{ Proxy = $pxy.AbsoluteUri; ProxyUseDefaultCredentials = $true }
-        Write-Output "$(Get-TS): Detected system proxy: $($pxy.AbsoluteUri)"
-    } else {
-        Write-Output "$(Get-TS): No system proxy configured; using direct connection."
-    }
-} catch { Write-Warning "$(Get-TS): Proxy detection failed ($($_.Exception.Message)); using direct connection." }
+if ($NoProxy) {
+    [System.Net.WebRequest]::DefaultWebProxy = $null
+    Write-Output "$(Get-TS): -NoProxy specified: forcing a DIRECT connection (proxy detection skipped)."
+} else {
+    try {
+        $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
+        $sysProxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+        [System.Net.WebRequest]::DefaultWebProxy = $sysProxy
+        $probeUri = [Uri]'https://www.catalog.update.microsoft.com/'
+        $pxy = $sysProxy.GetProxy($probeUri)
+        if ($pxy -and ($pxy.AbsoluteUri.TrimEnd('/') -ne $probeUri.AbsoluteUri.TrimEnd('/'))) {
+            $Script:ProxyArgs = @{ Proxy = $pxy.AbsoluteUri; ProxyUseDefaultCredentials = $true }
+            Write-Output "$(Get-TS): Detected system proxy: $($pxy.AbsoluteUri)  (re-run with -NoProxy if this is wrong)"
+        } else {
+            Write-Output "$(Get-TS): No system proxy configured; using direct connection."
+        }
+    } catch { Write-Warning "$(Get-TS): Proxy detection failed ($($_.Exception.Message)); using direct connection." }
+}
 
 # Single web-request path (proxy-aware, TLS1.2, basic parsing). Optional -OutFile downloads.
 function Invoke-Web {

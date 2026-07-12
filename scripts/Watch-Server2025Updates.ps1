@@ -48,7 +48,7 @@
         -ShareRoot 'D:\PatchedImages' -KeepLast 12
 
 .NOTES
-    Version : 1.0.2
+    Version : 1.0.4
     Project : server2025-servicing
     License : MIT
     Intended to run on a decoupled management/build host (ADK + WinPE), elevated.
@@ -64,11 +64,12 @@ param(
     [string]$ShareRoot,
     [int]$KeepLast = 12,
     [switch]$MonthlyOnly,
+    [switch]$NoProxy,
     [string]$LogDir
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.2'
+$ScriptVersion = '1.0.4'
 if ($SourceISO -and -not (Test-Path $SourceISO)) { throw "SourceISO not found on this host: $SourceISO" }
 if (-not $StateFile) { $StateFile = Join-Path $OutputDir 'state\last-built.json' }
 if (-not $LogDir)    { $LogDir    = Join-Path $OutputDir 'logs' }
@@ -82,20 +83,35 @@ Write-Output "$(TS): Watch-Server2025Updates v$ScriptVersion starting (MonthlyOn
 # --- proxy-aware, retried Catalog access (lightweight: search only, no download) ----
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Watch-Server2025Updates'
+# NOTE: when this runs as SYSTEM (scheduled task), GetSystemWebProxy() reads SYSTEM's own
+# WinINET hive (HKU\S-1-5-18), NOT your interactive user's settings. A stale ProxyEnable
+# there makes us dial a dead proxy -> "Unable to connect to the remote server". The decision
+# is logged, and -NoProxy forces a direct connection.
 $ProxyArgs = @{}
-try {
-    $sp = [System.Net.WebRequest]::GetSystemWebProxy()
-    $sp.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
-    [System.Net.WebRequest]::DefaultWebProxy = $sp
-    $probe = [Uri]'https://www.catalog.update.microsoft.com/'
-    $pxy = $sp.GetProxy($probe)
-    if ($pxy -and ($pxy.AbsoluteUri.TrimEnd('/') -ne $probe.AbsoluteUri.TrimEnd('/'))) {
-        $ProxyArgs = @{ Proxy = $pxy.AbsoluteUri; ProxyUseDefaultCredentials = $true }
-    }
-} catch {}
+if ($NoProxy) {
+    [System.Net.WebRequest]::DefaultWebProxy = $null
+    Write-Output "$(TS): -NoProxy specified: forcing a DIRECT connection (proxy detection skipped)."
+} else {
+    try {
+        $sp = [System.Net.WebRequest]::GetSystemWebProxy()
+        $sp.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+        [System.Net.WebRequest]::DefaultWebProxy = $sp
+        $probe = [Uri]'https://www.catalog.update.microsoft.com/'
+        $pxy = $sp.GetProxy($probe)
+        if ($pxy -and ($pxy.AbsoluteUri.TrimEnd('/') -ne $probe.AbsoluteUri.TrimEnd('/'))) {
+            $ProxyArgs = @{ Proxy = $pxy.AbsoluteUri; ProxyUseDefaultCredentials = $true }
+            Write-Output "$(TS): Detected system proxy: $($pxy.AbsoluteUri)  (re-run with -NoProxy if this is wrong)"
+        } else {
+            Write-Output "$(TS): No system proxy detected; using a DIRECT connection."
+        }
+    } catch { Write-Warning "$(TS): Proxy detection failed ($($_.Exception.Message)); using a direct connection." }
+}
 
+# The Catalog endpoint is demonstrably flaky (transient "Unable to connect", HTTP errors),
+# and its DNS returns AAAA records whose IPv6 path isn't always routable. A miss here costs a
+# whole day (we exit 0 and wait for tomorrow), so budget generously: 8 x 30s ~= 4 minutes.
 function Invoke-Retry {
-    param([scriptblock]$Script,[int]$Retries = 4,[int]$Delay = 15)
+    param([scriptblock]$Script,[int]$Retries = 8,[int]$Delay = 30)
     for ($i = 1; $i -le $Retries; $i++) {
         try { return (& $Script) }
         catch { if ($i -ge $Retries) { throw }; Write-Output "$(TS): retry $i/$Retries after: $($_.Exception.Message)"; Start-Sleep -Seconds $Delay }
@@ -167,6 +183,7 @@ try {
     #    (-BasePath is the slipstream's working+output dir, so it must equal $OutputDir).
     $slipArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$SlipstreamScript,'-BasePath',$OutputDir)
     if ($SourceISO) { $slipArgs += @('-SourceISO',$SourceISO) }
+    if ($NoProxy)   { $slipArgs += '-NoProxy' }   # the slipstream makes its own Catalog calls
     Write-Output "$(TS): New build detected -> launching slipstream: $SlipstreamScript"
     Write-Output "$(TS):   -BasePath $OutputDir$(if($SourceISO){"  -SourceISO $SourceISO"})"
     & powershell.exe @slipArgs

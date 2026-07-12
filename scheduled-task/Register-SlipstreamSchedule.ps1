@@ -53,7 +53,7 @@
     .\Register-SlipstreamSchedule.ps1 -ShareRoot 'D:\PatchedImages' -KeepLast 6 -MonthlyOnly
 
 .NOTES
-    Version : 1.1.2
+    Version : 1.1.3
     Project : server2025-servicing
     License : MIT
     Run elevated on the decoupled management/build host (must have ADK + WinPE).
@@ -71,12 +71,13 @@ param(
     [int]$KeepLast     = 12,
     [string]$Time      = '02:00',
     [switch]$MonthlyOnly,
+    [switch]$NoProxy,
     [string]$RunAsUser = 'SYSTEM',
     [string]$TaskName  = 'Server2025-Update-Watch'
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.1.2'
+$ScriptVersion = '1.1.3'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Split-Path $here -Parent
 
@@ -98,6 +99,7 @@ $arg = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -SlipstreamScript "{1}" -
         $WatchScript, $SlipstreamScript, $OutputDir, $StateFile, $KeepLast, $ShareRoot
 if ($SourceISO)   { $arg += ' -SourceISO "{0}"' -f $SourceISO }
 if ($MonthlyOnly) { $arg += ' -MonthlyOnly' }
+if ($NoProxy)     { $arg += ' -NoProxy' }   # forces direct; also passed through to the slipstream
 
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
