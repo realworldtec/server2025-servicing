@@ -13,7 +13,10 @@
     Idempotent: re-run to update the task (-Force).
 
 .PARAMETER ShareRoot
-    UNC/local folder to archive finished ISOs to (passed to the detector). Required.
+    Folder to archive finished ISOs to (passed to the detector). Default D:\PatchedImages.
+    A LOCAL folder is simplest - share it out afterwards if needed. If you point this at a
+    UNC, note the task runs as SYSTEM and hits the share as the machine account: either grant
+    DOMAIN\HOST$ access or use -RunAsUser. Size for KeepLast x ~8.6 GB.
 
 .PARAMETER WatchScript
     Path to Watch-Server2025Updates.ps1. Default: ..\scripts\Watch-Server2025Updates.ps1.
@@ -22,7 +25,7 @@
     Path to Slipstream-Server2025.ps1. Default: ..\scripts\Slipstream-Server2025.ps1.
 
 .PARAMETER OutputDir
-    Slipstream output dir. Default C:\Installs\Server2025Patching.
+    Slipstream working + output dir. Default D:\Server2025Patching (needs ~30-40 GB free).
 
 .PARAMETER StateFile
     Detector state marker. Default <OutputDir>\state\last-built.json.
@@ -43,14 +46,14 @@
     Default 'Server2025-Update-Watch'.
 
 .EXAMPLE
-    .\Register-SlipstreamSchedule.ps1 -ShareRoot '\\fileserver\Images\Server2025' -KeepLast 12
+    # All defaults (D:\ data volume): archive D:\PatchedImages, work D:\Server2025Patching
+    .\Register-SlipstreamSchedule.ps1
 
 .EXAMPLE
-    .\Register-SlipstreamSchedule.ps1 -ShareRoot '\\fileserver\Images\Server2025' `
-        -RunAsUser 'CORP\svc-imaging' -MonthlyOnly
+    .\Register-SlipstreamSchedule.ps1 -ShareRoot 'D:\PatchedImages' -KeepLast 6 -MonthlyOnly
 
 .NOTES
-    Version : 1.1.0
+    Version : 1.1.2
     Project : server2025-servicing
     License : MIT
     Run elevated on the decoupled management/build host (must have ADK + WinPE).
@@ -59,10 +62,11 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$ShareRoot,
+    [string]$ShareRoot = 'D:\PatchedImages',
     [string]$WatchScript,
     [string]$SlipstreamScript,
-    [string]$OutputDir = 'C:\Installs\Server2025Patching',
+    [string]$OutputDir = 'D:\Server2025Patching',
+    [string]$SourceISO = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO',
     [string]$StateFile,
     [int]$KeepLast     = 12,
     [string]$Time      = '02:00',
@@ -72,7 +76,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.1.2'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Split-Path $here -Parent
 
@@ -82,9 +86,17 @@ if (-not $StateFile)        { $StateFile        = Join-Path $OutputDir 'state\la
 foreach ($p in @($WatchScript,$SlipstreamScript)) { if (-not (Test-Path $p)) { throw "Script not found: $p" } }
 if (-not (Test-Path $ShareRoot)) { Write-Warning "ShareRoot not reachable right now: $ShareRoot (task still registered; verify access under the run-as account)." }
 
+# The RTM ISO must exist on THIS host - the slipstream reads it every build.
+if ($SourceISO) {
+    if (-not (Test-Path $SourceISO)) { throw "SourceISO not found: $SourceISO" }
+} else {
+    Write-Warning "No -SourceISO given; the slipstream will use its built-in default path. Verify the RTM ISO exists there on this host, or re-register with -SourceISO."
+}
+
 # --- Build the detector command line the task will run -------------------------
 $arg = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -SlipstreamScript "{1}" -OutputDir "{2}" -StateFile "{3}" -KeepLast {4} -ShareRoot "{5}"' -f `
         $WatchScript, $SlipstreamScript, $OutputDir, $StateFile, $KeepLast, $ShareRoot
+if ($SourceISO)   { $arg += ' -SourceISO "{0}"' -f $SourceISO }
 if ($MonthlyOnly) { $arg += ' -MonthlyOnly' }
 
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg

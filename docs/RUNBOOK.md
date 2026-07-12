@@ -24,14 +24,14 @@ marker at `<OutputDir>\state\last-built.json`). Register it once with
 What it does, unattended: downloads the current LCU (+ checkpoint), SafeOS DU, Setup DU and
 .NET CU; extracts the RTM ISO; services WinRE, all four `install.wim` editions, and
 `boot.wim`; refreshes Setup files; rebuilds a UEFI+BIOS ISO with `oscdimg`; verifies the
-patched build. Output: `C:\Installs\Server2025Patching\Server2025_Patched_<stamp>.iso`.
+patched build. Output: `D:\Server2025Patching\Server2025_Patched_<stamp>.iso`.
 
 Notes:
 - **Runtime is hours** (install.wim carries all four editions). A failed run leaves the
   serviced `install.wim` in `\newMedia`; simply re-running **resumes** past it. `-Fresh`
   forces a clean rebuild.
 - **Offline / air-gapped:** pre-stage the four packages under
-  `C:\Installs\Server2025Patching\packages\{CU,SafeOS_DU,Setup_DU,DotNet_CU}\` and run;
+  `D:\Server2025Patching\packages\{CU,SafeOS_DU,Setup_DU,DotNet_CU}\` and run;
   the Catalog is skipped automatically when everything is staged.
 - **Archive** the finished ISO to the share and keep history (the scheduled task does this).
   Keep the **RTM ISO** and **FoD ISO** on the same share — you'll need them for repairs.

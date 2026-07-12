@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     End-to-end, unattended pipeline that:
-      1. Creates the working folder tree under C:\Installs\Server2025Patching.
+      1. Creates the working folder tree under -BasePath (default D:\Server2025Patching).
       2. Auto-downloads the current updates directly from the Microsoft Update Catalog
          (self-contained - no PowerShell module; retried search + BITS CDN downloads):
            - Latest Cumulative Update (LCU) + any prerequisite CHECKPOINT CUs
@@ -28,13 +28,14 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 1.0.0
+    Version    : 1.0.1
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
     Windows ADK + WinPE add-on installed in the default location.
     Latest Server 2025 LCU at time of writing: KB5094125 (2026-06, build 26100.32995).
-    Requires ~30-40 GB free on C: and internet access (unless pre-staging updates).
+    Requires ~30-40 GB free on the -BasePath volume and internet access
+    (unless pre-staging updates). Mounted ISO drive letters are resolved dynamically.
 
 .EXAMPLE
     powershell.exe -ExecutionPolicy Bypass -File .\Slipstream-Server2025.ps1
@@ -43,11 +44,11 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    # Source RTM media
-    [string]$SourceISO   = 'C:\Installs\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO',
+    # Source RTM media (data volume; the ISO is mounted read-only during the build)
+    [string]$SourceISO   = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO',
 
-    # Base working directory for all extractions / mounts / output
-    [string]$BasePath    = 'C:\Installs\Server2025Patching',
+    # Base working directory for all extractions / mounts / output (needs ~30-40 GB free)
+    [string]$BasePath    = 'D:\Server2025Patching',
 
     # Volume label for the finished ISO (max 32 chars for UDF)
     [string]$IsoLabel    = 'SERVER2025_PATCHED',
@@ -64,7 +65,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '1.0.0'
+$ScriptVersion          = '1.0.1'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns

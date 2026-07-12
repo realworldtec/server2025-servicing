@@ -20,7 +20,12 @@
     Path to Slipstream-Server2025.ps1.
 
 .PARAMETER OutputDir
-    Where the slipstream writes its ISO. Default C:\Installs\Server2025Patching.
+    Slipstream working + output dir (passed to the slipstream as -BasePath, so the two always
+    agree). Default D:\Server2025Patching.
+
+.PARAMETER SourceISO
+    Full path to the Server 2025 RTM ISO on THIS host. Passed to the slipstream as -SourceISO.
+    Omit only if the slipstream's own default path is correct on this machine.
 
 .PARAMETER StateFile
     JSON marker of the last-built LCU. Default <OutputDir>\state\last-built.json.
@@ -39,10 +44,11 @@
 
 .EXAMPLE
     .\Watch-Server2025Updates.ps1 -SlipstreamScript .\Slipstream-Server2025.ps1 `
-        -ShareRoot \\fileserver\Images\Server2025 -KeepLast 12
+        -SourceISO 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO' `
+        -ShareRoot 'D:\PatchedImages' -KeepLast 12
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.0.2
     Project : server2025-servicing
     License : MIT
     Intended to run on a decoupled management/build host (ADK + WinPE), elevated.
@@ -52,7 +58,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$SlipstreamScript,
-    [string]$OutputDir = 'C:\Installs\Server2025Patching',
+    [string]$OutputDir = 'D:\Server2025Patching',
+    [string]$SourceISO,
     [string]$StateFile,
     [string]$ShareRoot,
     [int]$KeepLast = 12,
@@ -61,7 +68,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.2'
+if ($SourceISO -and -not (Test-Path $SourceISO)) { throw "SourceISO not found on this host: $SourceISO" }
 if (-not $StateFile) { $StateFile = Join-Path $OutputDir 'state\last-built.json' }
 if (-not $LogDir)    { $LogDir    = Join-Path $OutputDir 'logs' }
 foreach ($d in @((Split-Path $StateFile -Parent), $LogDir)) { if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
@@ -155,9 +163,13 @@ try {
         }
     }
 
-    # 3. Build
+    # 3. Build. Pass paths EXPLICITLY so nothing depends on the slipstream's own defaults
+    #    (-BasePath is the slipstream's working+output dir, so it must equal $OutputDir).
+    $slipArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$SlipstreamScript,'-BasePath',$OutputDir)
+    if ($SourceISO) { $slipArgs += @('-SourceISO',$SourceISO) }
     Write-Output "$(TS): New build detected -> launching slipstream: $SlipstreamScript"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SlipstreamScript
+    Write-Output "$(TS):   -BasePath $OutputDir$(if($SourceISO){"  -SourceISO $SourceISO"})"
+    & powershell.exe @slipArgs
     $slipExit = $LASTEXITCODE
     if ($slipExit -ne 0) { throw "Slipstream exited $slipExit; state NOT stamped (will retry next run)." }
 

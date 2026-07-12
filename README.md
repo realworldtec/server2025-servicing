@@ -14,7 +14,12 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **1.1.0** — see [CHANGELOG.md](CHANGELOG.md).
+Version **1.2.0** — see [CHANGELOG.md](CHANGELOG.md).
+
+> **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
+> `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
+> `D:\PatchedImages`. Override with `-SourceISO` / `-BasePath` / `-ShareRoot` if your layout
+> differs. Mounted-ISO drive letters are always resolved dynamically — never hardcoded.
 
 ## Why this exists
 
@@ -65,7 +70,7 @@ server2025-servicing/
 .\scripts\Slipstream-Server2025.ps1
 ```
 
-Output: `C:\Installs\Server2025Patching\Server2025_Patched_<stamp>.iso`. Re-runs auto-resume
+Output: `D:\Server2025Patching\Server2025_Patched_<stamp>.iso`. Re-runs auto-resume
 if a prior run already serviced `install.wim`; add `-Fresh` to force a clean rebuild.
 
 **Repair a live server's store (mount patched ISO = F:, FoD ISO = G:):**
@@ -88,16 +93,28 @@ CU lands (and it naturally covers out-of-band releases). Runs on a decoupled man
 - `Watch-Server2025Updates.ps1` runs **daily at 02:00**; it's a fast no-op on days with
   nothing new, and launches the slipstream only when the Catalog shows a build newer than the
   last one built (tracked in a small JSON state marker — idempotent, never double-builds).
-- Finished ISOs are copied to a **shared location** (UNC) with a retention policy
-  (default: keep 12). Point repairs at the archived ISO matching the target host's build.
+- Finished ISOs are archived to `-ShareRoot` with a retention policy (default: keep 12). Point
+  repairs at the archived ISO matching the target host's build.
 - `-MonthlyOnly` restricts builds to the 2nd-Tuesday security LCU (ignores OOB) if preferred.
 
 Register it (on the management/build host):
 
 ```powershell
-.\scheduled-task\Register-SlipstreamSchedule.ps1 -ShareRoot '\\fileserver\Images\Server2025' -KeepLast 12
-# add -MonthlyOnly to ignore out-of-band releases; -RunAsUser 'CORP\svc-imaging' if the share needs auth
+.\scheduled-task\Register-SlipstreamSchedule.ps1 `
+    -ShareRoot 'D:\PatchedImages' `
+    -SourceISO 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO' `
+    -KeepLast 12
+# -MonthlyOnly ignores out-of-band releases.
 ```
+
+**`-ShareRoot` sizing:** archive = `KeepLast x ~8.6 GB` (12 ≈ 103 GB), plus the slipstream's
+~30–40 GB working set. A **local folder** (as above) is simplest — share it afterwards if
+needed. If you point it at a **UNC**, the task runs as SYSTEM and hits the share as the
+*machine account*, so either grant `DOMAIN\HOST$` access or register with
+`-RunAsUser 'CORP\svc-imaging'`.
+
+**Prereqs on that host:** Windows ADK + WinPE add-on (for `oscdimg`), and the RTM ISO at
+`-SourceISO`.
 
 Dry-run any time with `Start-ScheduledTask -TaskName 'Server2025-Update-Watch'` and watch
 `…\logs\Watch_*.log`.
