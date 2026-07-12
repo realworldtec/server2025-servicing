@@ -14,12 +14,22 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **1.2.4** — see [CHANGELOG.md](CHANGELOG.md).
+Version **1.3.0** — see [CHANGELOG.md](CHANGELOG.md).
 
 > **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
 > `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
 > `D:\PatchedImages`. Override with `-SourceISO` / `-BasePath` / `-ShareRoot` if your layout
 > differs. Mounted-ISO drive letters are always resolved dynamically — never hardcoded.
+
+## Quality gate (run this before trusting any change)
+
+```powershell
+.\tests\Invoke-QualityGate.ps1 -InstallAnalyzer   # first run
+.\tests\Install-GitHook.ps1                       # block bad commits automatically
+```
+
+Real AST parse + PSScriptAnalyzer + project-specific rules. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for why this exists and the VERIFIED/UNVERIFIED protocol for AI-authored changes.
 
 ## Why this exists
 

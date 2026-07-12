@@ -8,6 +8,32 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [1.3.0] - 2026-07-13
+
+Quality tooling. Motivation: the assistant that authored much of this code **cannot execute
+PowerShell** (no `pwsh` in its sandbox, package sources blocked). Every script it produced was
+therefore shipped *unparsed*, and several real bugs reached production hosts as a result
+(a comment swallowing a closing brace; `try/catch` piped into `Out-File`; a double
+`Stop-Transcript` silently turning `exit 0` into `1`; native `dism.exe` stdout polluting a
+function's return value; `return ,$x` + `@()` nesting an array). Brace-counting was presented as
+validation and was not.
+
+The remedy is to move real validation to a machine that has a real parser.
+
+### Added
+- **`tests/Invoke-QualityGate.ps1`** (v1.0.0) - three-layer gate:
+  1. **AST parse** of every `.ps1` via `[System.Management.Automation.Language.Parser]` - the
+     real parser; catches every syntax error a heuristic cannot.
+  2. **PSScriptAnalyzer** (`-InstallAnalyzer` bootstraps it).
+  3. **Project rules** targeting the exact footguns this codebase has hit: `Stop-Transcript`
+     both inside and outside a `finally`; the `return ,$var` comma-wrap idiom; native `*.exe`
+     calls inside a function without `| Out-Null` / `| Out-Host`.
+  Exit 0 = pass, 1 = fail. Suitable for CI.
+- **`tests/Install-GitHook.ps1`** (v1.0.0) - installs a `pre-commit` hook so nothing that fails
+  the gate can be committed (`git commit --no-verify` to bypass).
+- **`CONTRIBUTING.md`** - documents the constraint and the required VERIFIED / UNVERIFIED
+  labelling protocol for AI-authored changes.
+
 ## [1.2.4] - 2026-07-13
 
 ### Fixed
@@ -215,7 +241,8 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.4...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v1.3.0...HEAD
+[1.3.0]: https://example.com/server2025-servicing/compare/v1.2.4...v1.3.0
 [1.2.4]: https://example.com/server2025-servicing/compare/v1.2.3...v1.2.4
 [1.2.3]: https://example.com/server2025-servicing/compare/v1.2.2...v1.2.3
 [1.2.2]: https://example.com/server2025-servicing/compare/v1.2.1...v1.2.2
