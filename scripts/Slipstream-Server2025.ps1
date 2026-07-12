@@ -28,7 +28,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 1.0.1
+    Version    : 1.0.2
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -65,7 +65,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '1.0.1'
+$ScriptVersion          = '1.0.2'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -404,7 +404,7 @@ if ($cuFiles.Count -gt 1) { Write-Output "$(Get-TS): Checkpoint file(s) (install
 
 # --- Single-file packages, each in its OWN folder (no filename guessing) ------
 # Returns the path to the one package file in $Destination.
-function Ensure-SinglePackage {
+function Resolve-SinglePackage {
     param($Name,$Query,$Include,$Destination,$Exclude = '(?!)',[switch]$Optional)
     $have = @(Get-ChildItem $Destination -File -ErrorAction SilentlyContinue)
     if ($have.Count -gt 0 -and -not $ForceDownload) {
@@ -425,13 +425,13 @@ function Ensure-SinglePackage {
 # NOTE: the SafeOS/Setup Dynamic Updates are keyed to build 26100 (24H2). Microsoft now
 # titles them "...Windows 11, versions 24H2 and 25H2" (they still service Server 2025's
 # WinRE); the match below accepts either the server-named or the 24H2 client-named package.
-$SAFE_OS_DU_PATH = Ensure-SinglePackage -Name 'SafeOS DU' -Destination $SAFEOS_DIR `
+$SAFE_OS_DU_PATH = Resolve-SinglePackage -Name 'SafeOS DU' -Destination $SAFEOS_DIR `
     -Query 'Safe OS Dynamic Update Microsoft server operating system version 24H2 x64' `
     -Include 'Safe OS Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? version.*24H2)'
-$SETUP_DU_PATH = Ensure-SinglePackage -Name 'Setup DU' -Destination $SETUP_DIR `
+$SETUP_DU_PATH = Resolve-SinglePackage -Name 'Setup DU' -Destination $SETUP_DIR `
     -Query 'Setup Dynamic Update Microsoft server operating system version 24H2 x64' `
     -Include 'Setup Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? version.*24H2)'
-$DOTNET_CU_PATH = Ensure-SinglePackage -Name '.NET CU' -Destination $DOTNET_DIR -Optional `
+$DOTNET_CU_PATH = Resolve-SinglePackage -Name '.NET CU' -Destination $DOTNET_DIR -Optional `
     -Query 'Cumulative Update .NET Framework Microsoft server operating system version 24H2 x64' `
     -Include 'Cumulative Update for \.NET Framework .*Microsoft server operating system version 24H2' `
     -Exclude 'Preview'

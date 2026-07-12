@@ -8,6 +8,18 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [1.2.1] - 2026-07-13
+
+### Changed
+- **`scripts/Slipstream-Server2025.ps1`** (→ v1.0.2) — renamed the internal helper
+  `Ensure-SinglePackage` → **`Resolve-SinglePackage`**. `Ensure` is not an approved PowerShell
+  verb, so PSScriptAnalyzer (and the VS Code PowerShell extension) flagged it with
+  `PSUseApprovedVerbs`. `Resolve` is approved and matches the existing `Resolve-FodSource` /
+  `Resolve-InstallWim` / `Resolve-Index` naming. Internal function only — no parameter or
+  behaviour change.
+
+Audited every `Verb-Noun` function across the repo; this was the only unapproved verb.
+
 ## [1.2.0] - 2026-07-13
 
 Relocated all build-host defaults to a dedicated data volume (`D:`). **Breaking for anyone
@@ -143,7 +155,8 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.0...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.1...HEAD
+[1.2.1]: https://example.com/server2025-servicing/compare/v1.2.0...v1.2.1
 [1.2.0]: https://example.com/server2025-servicing/compare/v1.1.1...v1.2.0
 [1.1.1]: https://example.com/server2025-servicing/compare/v1.1.0...v1.1.1
 [1.1.0]: https://example.com/server2025-servicing/compare/v1.0.0...v1.1.0
