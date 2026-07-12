@@ -8,6 +8,28 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [1.2.4] - 2026-07-13
+
+### Fixed
+- **`scripts/Watch-Server2025Updates.ps1`** (-> v1.0.5) - the detector returned **exit code 1**
+  on its normal "No new build ... Nothing to do." path, so Task Scheduler reported `0x1`
+  (failure) for a perfectly healthy no-op run.
+
+  Cause: the early-exit paths called `Stop-Transcript` and then `exit 0`. In PowerShell, `exit`
+  inside a `try` still runs the `finally`, which called `Stop-Transcript` a **second** time. The
+  redundant call throws "The host is not currently transcribing", and with
+  `$ErrorActionPreference = 'Stop'` a terminating error raised in a `finally` block **overrides
+  the script's exit code** - turning `exit 0` into `1`. The transcript had already closed, which
+  is why the error never appeared in the log.
+
+  Fix: the `finally` block is now the sole owner of the transcript (guarded with try/catch); the
+  early-exit paths just `exit 0`.
+
+### Notes
+- The widened retry budget from 1.2.3 proved itself on first contact: three consecutive
+  transient "Unable to connect to the remote server" failures, then a successful Catalog poll
+  ~2.5 minutes in. The old 4 x 15s budget would have aborted.
+
 ## [1.2.3] - 2026-07-13
 
 ### Changed
@@ -193,7 +215,8 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.3...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v1.2.4...HEAD
+[1.2.4]: https://example.com/server2025-servicing/compare/v1.2.3...v1.2.4
 [1.2.3]: https://example.com/server2025-servicing/compare/v1.2.2...v1.2.3
 [1.2.2]: https://example.com/server2025-servicing/compare/v1.2.1...v1.2.2
 [1.2.1]: https://example.com/server2025-servicing/compare/v1.2.0...v1.2.1

@@ -48,7 +48,7 @@
         -ShareRoot 'D:\PatchedImages' -KeepLast 12
 
 .NOTES
-    Version : 1.0.4
+    Version : 1.0.5
     Project : server2025-servicing
     License : MIT
     Intended to run on a decoupled management/build host (ADK + WinPE), elevated.
@@ -69,7 +69,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.4'
+$ScriptVersion = '1.0.5'
 if ($SourceISO -and -not (Test-Path $SourceISO)) { throw "SourceISO not found on this host: $SourceISO" }
 if (-not $StateFile) { $StateFile = Join-Path $OutputDir 'state\last-built.json' }
 if (-not $LogDir)    { $LogDir    = Join-Path $OutputDir 'logs' }
@@ -155,9 +155,12 @@ $exit = 0
 try {
     # 1. Detect
     $latest = $null
+    # NOTE on every 'exit 0' below: do NOT call Stop-Transcript here - the finally block is the
+    # sole owner of the transcript. A second Stop-Transcript throws, and a terminating error in
+    # finally overrides the exit code (clean 'exit 0' becomes 1).
     try { $latest = Get-LatestServerLcu }
-    catch { Write-Warning "$(TS): Catalog unreachable ($($_.Exception.Message)); will retry next run."; Stop-Transcript | Out-Null; exit 0 }
-    if (-not $latest) { Write-Warning "$(TS): No Server 2025 LCU found in Catalog results; skipping."; Stop-Transcript | Out-Null; exit 0 }
+    catch { Write-Warning "$(TS): Catalog unreachable ($($_.Exception.Message)); will retry next run."; exit 0 }
+    if (-not $latest) { Write-Warning "$(TS): No Server 2025 LCU found in Catalog results; skipping."; exit 0 }
     Write-Output "$(TS): Latest available LCU: $($latest.KB) build $($latest.Build) (Catalog date $($latest.Date.ToString('yyyy-MM-dd')))"
 
     # 2. Compare to state
@@ -167,7 +170,7 @@ try {
     }
     if ($latest.Build -le $lastBuild) {
         Write-Output "$(TS): No new build (latest $($latest.Build) <= last built $lastBuild). Nothing to do."
-        Stop-Transcript | Out-Null; exit 0
+        exit 0
     }
 
     # 2b. MonthlyOnly gate (skip OOB / off-cycle)
@@ -175,7 +178,7 @@ try {
         $secondTue = (Get-SecondTuesday -Year $latest.Date.Year -Month $latest.Date.Month).Date
         if ($latest.Date.Date -ne $secondTue) {
             Write-Output "$(TS): -MonthlyOnly: $($latest.KB) dated $($latest.Date.ToString('yyyy-MM-dd')) is not the 2nd-Tuesday release ($($secondTue.ToString('yyyy-MM-dd'))); skipping."
-            Stop-Transcript | Out-Null; exit 0
+            exit 0
         }
     }
 
@@ -224,6 +227,9 @@ catch {
     $exit = 1
 }
 finally {
-    Stop-Transcript | Out-Null
+    # Sole owner of the transcript. Guarded: with $ErrorActionPreference='Stop', a redundant
+    # Stop-Transcript throws "host is not currently transcribing", and a terminating error in
+    # a finally block OVERRIDES the script's exit code (turning a clean 'exit 0' into 1).
+    try { Stop-Transcript | Out-Null } catch {}
 }
 exit $exit
