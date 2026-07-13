@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 2.0.0   (was Slipstream-Server2025.ps1 v1.0.4 - now multi-product)
+    Version    : 2.1.0   (multi-product; refined edition selection)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -73,15 +73,39 @@ param(
     [string]$IsoLabel,
 
     # --- Edition selection (install.wim) -------------------------------------------------
+    # Resolution order:
+    #   1. -AllEditions                      -> every edition
+    #   2. -Index / -EditionName (union)     -> explicit request
+    #   3. $PRODUCTS[$Product].DefaultEditions (exact names)
+    #   4. nothing configured                -> every edition
+    # then -ExcludeEditionName and -ExcludeN are subtracted.
+
     # List the editions in the source media and exit. Nothing is downloaded or serviced.
     [switch]$ListEditions,
 
-    # Patch ONLY these install.wim indexes (e.g. -Index 3,7). Empty = all editions.
+    # Resolve the selection against the SOURCE media, print it (+ the output index map), exit.
+    # No download, no servicing. Use this before committing to a multi-hour build.
+    [switch]$DryRun,
+
+    # Patch ONLY these install.wim indexes (e.g. -Index 3,5,9).
     [int[]]$Index,
 
-    # Patch ONLY editions whose ImageName matches any of these (wildcards ok, e.g.
-    # -EditionName '*Enterprise*','*Pro'). Combined with -Index as a UNION.
+    # Patch editions whose ImageName is -like any of these. EXACT names match exactly
+    # ('Windows 11 Pro' does NOT match 'Windows 11 Pro N'); wildcards are broad, so
+    # '*Pro*' WILL also pull in Pro N / Pro Education / Pro N for Workstations.
+    # Combined with -Index as a UNION.
     [string[]]$EditionName,
+
+    # Remove editions matching these -like patterns from the selection (applied last).
+    # e.g. -EditionName '*Pro*' -ExcludeEditionName '*Education*'
+    [string[]]$ExcludeEditionName,
+
+    # Drop the 'N' editions. Robust: matches a STANDALONE 'N' token, which is NOT always at
+    # the end - "Windows 11 Pro N for Workstations" has it in the middle.
+    [switch]$ExcludeN,
+
+    # Ignore the product's DefaultEditions and select every edition in the media.
+    [switch]$AllEditions,
 
     # Output install.wim contains ONLY the selected editions (smaller ISO). Indexes are
     # renumbered 1..N in the output; the old->new mapping is logged.
@@ -110,11 +134,23 @@ param(
 #  Win11-24H2 titles vary ("Windows 11 Version 24H2" / "versions 24H2 and 25H2"), so its
 #  regexes are deliberately tolerant. UNVERIFIED - confirm before relying on it.
 # ===========================================================================
+#
+#  DefaultEditions: EXACT ImageName list patched when no -Index/-EditionName is given.
+#  $null = patch every edition. Exact names are used (not wildcards) because wildcards are
+#  treacherous here: '*Pro*' also matches "Pro N", "Pro Education", "Pro N for Workstations".
+#  Edition layouts VERIFIED by enumerating the actual media (2026-07-13):
+#    Server 2025 RTM   : 4 editions  (Std / Std Desktop / DC / DC Desktop)
+#    Win11 24H2 + 25H2 : 10 editions, IDENTICAL index->name layout in both:
+#       1 Education   2 Education N   3 Enterprise   4 Enterprise N   5 Pro
+#       6 Pro N       7 Pro Education 8 Pro Education N
+#       9 Pro for Workstations        10 Pro N for Workstations
+# ===========================================================================
 $PRODUCTS = @{
     'Server2025' = @{
         Label         = 'SERVER2025_PATCHED'
         BasePath      = 'D:\Server2025Patching'
         SourceISO     = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO'
+        DefaultEditions = $null      # all 4 - the scheduled task relies on this
         PreferRegex   = 'server operating system'
         LcuQuery      = 'Cumulative Update Microsoft server operating system version 24H2 x64'
         LcuInclude    = 'Cumulative Update for Microsoft server operating system version 24H2'
@@ -129,6 +165,11 @@ $PRODUCTS = @{
         Label         = 'WIN11_25H2_PATCHED'
         BasePath      = 'D:\Win11_25H2_Patching'
         SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_25h2_x64_dvd_41c521e7.iso'
+        DefaultEditions = @(
+            'Windows 11 Enterprise'                 # index 3
+            'Windows 11 Pro'                        # index 5
+            'Windows 11 Pro for Workstations'       # index 9
+        )
         PreferRegex   = $null                       # no server/client disambiguation needed
         LcuQuery      = 'Cumulative Update for Windows 11 version 25H2 x64'
         LcuInclude    = 'Cumulative Update for Windows 11,? version 25H2'
@@ -142,7 +183,12 @@ $PRODUCTS = @{
     'Win11-24H2' = @{
         Label         = 'WIN11_24H2_PATCHED'
         BasePath      = 'D:\Win11_24H2_Patching'
-        SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64.iso'
+        SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64_dvd_59a1851e.iso'
+        DefaultEditions = @(
+            'Windows 11 Enterprise'                 # index 3
+            'Windows 11 Pro'                        # index 5
+            'Windows 11 Pro for Workstations'       # index 9
+        )
         PreferRegex   = $null
         LcuQuery      = 'Cumulative Update for Windows 11 version 24H2 x64'
         LcuInclude    = 'Cumulative Update for Windows 11,? version 24H2'
@@ -161,7 +207,7 @@ if (-not $IsoLabel)  { $IsoLabel  = $P.Label }
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '2.0.0'
+$ScriptVersion          = '2.1.0'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -177,6 +223,87 @@ function Invoke-Retry {
             Start-Sleep -Seconds $DelaySeconds
         }
     }
+}
+
+# ---------------------------------------------------------------------------
+#  Edition selection. ONE resolver, used by both -DryRun (against the source media) and the
+#  real servicing pass (against \newMedia), so a dry run can never disagree with the build.
+# ---------------------------------------------------------------------------
+function Resolve-EditionSelection {
+    param([Parameter(Mandatory)][object[]]$Images)
+
+    $sel = @()
+    if ($AllEditions) {
+        $sel = $Images
+    }
+    elseif ($Index -or $EditionName) {
+        if ($Index)       { $sel += @($Images | Where-Object { $Index -contains $_.ImageIndex }) }
+        if ($EditionName) {
+            foreach ($pat in $EditionName) {
+                $hit = @($Images | Where-Object { $_.ImageName -like $pat })
+                if ($hit.Count -eq 0) { Write-Warning "$(Get-TS): -EditionName '$pat' matched nothing." }
+                $sel += $hit
+            }
+        }
+    }
+    elseif ($P.DefaultEditions) {
+        foreach ($nm in $P.DefaultEditions) {
+            $hit = @($Images | Where-Object { $_.ImageName -eq $nm })   # EXACT, not -like
+            if ($hit.Count -eq 0) {
+                Write-Warning "$(Get-TS): Product default edition '$nm' is not present in this media - skipped. (Media layout changed?)"
+            }
+            $sel += $hit
+        }
+    }
+    else {
+        $sel = $Images                                                  # no default configured => all
+    }
+
+    $sel = @($sel | Sort-Object ImageIndex -Unique)
+
+    if ($ExcludeEditionName) {
+        foreach ($pat in $ExcludeEditionName) {
+            $before = $sel.Count
+            $sel = @($sel | Where-Object { $_.ImageName -notlike $pat })
+            Write-Output "$(Get-TS): -ExcludeEditionName '$pat' removed $($before - $sel.Count) edition(s)."
+        }
+    }
+    if ($ExcludeN) {
+        # Standalone 'N' token. Case-sensitive so a stray lowercase 'n' word can never match.
+        # NOTE the N is not always trailing: "Windows 11 Pro N for Workstations".
+        $before = $sel.Count
+        $sel = @($sel | Where-Object { $_.ImageName -cnotmatch '\bN\b' })
+        Write-Output "$(Get-TS): -ExcludeN removed $($before - $sel.Count) 'N' edition(s)."
+    }
+
+    return @($sel | Sort-Object ImageIndex -Unique)
+}
+
+# Print a resolved selection + the index map the output media will have.
+function Show-EditionPlan {
+    param([Parameter(Mandatory)][object[]]$Images,[Parameter(Mandatory)][object[]]$Selected)
+    $selIx = @($Selected | ForEach-Object { $_.ImageIndex })
+    Write-Output ""
+    Write-Output "Editions in source media ($($Images.Count)):"
+    foreach ($im in $Images) {
+        $mark = if ($selIx -contains $im.ImageIndex) { 'PATCH' } else { '  -  ' }
+        Write-Output ("  [{0,2}] {1}  {2}" -f $im.ImageIndex, $mark, $im.ImageName)
+    }
+    Write-Output ""
+    $exportList = if ($TrimMedia) { $Selected } else { $Images }
+    Write-Output ("Output install.wim will contain $($exportList.Count) edition(s){0}:" -f $(if($TrimMedia){' (TRIMMED)'}else{''}))
+    $n = 0
+    foreach ($im in $exportList) {
+        $n++
+        $state = if ($selIx -contains $im.ImageIndex) { 'patched' } else { 'RTM (UNPATCHED)' }
+        Write-Output ("  source [{0,2}] -> output [{1,2}]  {2,-16} {3}" -f $im.ImageIndex, $n, $state, $im.ImageName)
+    }
+    if (-not $TrimMedia -and $Selected.Count -lt $Images.Count) {
+        Write-Output ""
+        Write-Warning "MIXED-BUILD MEDIA: unselected editions stay at RTM. Not safe as a RestoreHealth source"
+        Write-Warning "for a patched host. Add -TrimMedia to emit only the patched editions."
+    }
+    Write-Output ""
 }
 
 # Mount an ISO and reliably return its drive letter (Get-Volume can lag the mount).
@@ -235,19 +362,33 @@ $Script:MountedISOs       = @()
 #  -ListEditions: enumerate the source media's editions and exit. Fast - mounts the ISO
 #  read-only, downloads nothing, services nothing. Use it to pick -Index / -EditionName.
 # ---------------------------------------------------------------------------
-if ($ListEditions) {
+if ($ListEditions -or $DryRun) {
     if (-not (Test-Path $SourceISO)) { throw "Source ISO not found: $SourceISO" }
-    Write-Output "$(Get-TS): Mounting source ISO to enumerate editions..."
+    Write-Output "$(Get-TS): Mounting source ISO to read its editions..."
     $lsDrive = Mount-IsoGetDrive -Path $SourceISO
     try {
         $lsWim = "$lsDrive`:\sources\install.wim"
-        if (-not (Test-Path $lsWim)) { throw "No install.wim at $lsWim (install.esd media is not supported by -ListEditions)." }
-        Write-Output ""
-        Get-WindowsImage -ImagePath $lsWim |
-            Select-Object ImageIndex, ImageName, @{N='SizeGB';E={[math]::Round($_.ImageSize/1GB,2)}} |
-            Format-Table -AutoSize | Out-String | Write-Output
-        Write-Output "Patch a subset with e.g.:  -Index 3,7    or    -EditionName '*Enterprise*'"
-        Write-Output "Add -TrimMedia to emit ONLY those editions (smaller ISO; indexes renumbered)."
+        if (-not (Test-Path $lsWim)) { throw "No install.wim at $lsWim (install.esd media is not supported here)." }
+        $lsImages = @(Get-WindowsImage -ImagePath $lsWim)
+
+        if ($ListEditions) {
+            Write-Output ""
+            $lsImages | Select-Object ImageIndex, ImageName, @{N='SizeGB';E={[math]::Round($_.ImageSize/1GB,2)}} |
+                Format-Table -AutoSize | Out-String | Write-Output
+            $def = if ($P.DefaultEditions) { $P.DefaultEditions -join ', ' } else { '(all editions)' }
+            Write-Output "Product default selection for '$Product': $def"
+            Write-Output ""
+            Write-Output "Select with:  -Index 3,5,9   |   -EditionName 'Windows 11 Pro'   |   -AllEditions"
+            Write-Output "Refine with:  -ExcludeEditionName '*Education*'   |   -ExcludeN   (drops N editions)"
+            Write-Output "Preview with: -DryRun        Emit only the selected editions with: -TrimMedia"
+        }
+
+        if ($DryRun) {
+            $lsSel = @(Resolve-EditionSelection -Images $lsImages)
+            if ($lsSel.Count -eq 0) { throw "Selection matched nothing. Use -ListEditions to see what is available." }
+            Show-EditionPlan -Images $lsImages -Selected $lsSel
+            Write-Output "$(Get-TS): DRY RUN - nothing downloaded, nothing serviced. Re-run without -DryRun to build."
+        }
     }
     finally {
         Dismount-DiskImage -ImagePath $SourceISO | Out-Null
@@ -650,28 +791,11 @@ if ($installServiced) {
     $WINOS_IMAGES = @(Get-WindowsImage -ImagePath $INSTALL_WIM)
     Write-Output "$(Get-TS): install.wim contains $($WINOS_IMAGES.Count) edition(s)."
 
-    # ---- Resolve the selection (union of -Index and -EditionName; empty = ALL) ----------
-    $selected = @()
-    if ($Index)       { $selected += @($WINOS_IMAGES | Where-Object { $Index -contains $_.ImageIndex }) }
-    if ($EditionName) {
-        foreach ($pat in $EditionName) {
-            $selected += @($WINOS_IMAGES | Where-Object { $_.ImageName -like $pat })
-        }
-    }
-    if (-not $Index -and -not $EditionName) { $selected = $WINOS_IMAGES }
-    $selected = @($selected | Sort-Object ImageIndex -Unique)
+    # ---- Resolve the selection (same resolver -DryRun used) -----------------------------
+    $selected = @(Resolve-EditionSelection -Images $WINOS_IMAGES)
     if ($selected.Count -eq 0) { throw "Edition selection matched nothing. Run with -ListEditions to see what is available." }
-
     $selIdx = @($selected | ForEach-Object { $_.ImageIndex })
-    Write-Output "$(Get-TS): Editions selected for patching ($($selected.Count) of $($WINOS_IMAGES.Count)):"
-    foreach ($s in $selected) { Write-Output ("$(Get-TS):    [{0}] {1}" -f $s.ImageIndex, $s.ImageName) }
-
-    if ($selected.Count -lt $WINOS_IMAGES.Count -and -not $TrimMedia) {
-        Write-Warning "$(Get-TS): MIXED-BUILD MEDIA: unselected editions are carried over UNPATCHED (still at RTM)."
-        Write-Warning "$(Get-TS): The resulting install.wim will contain editions at DIFFERENT builds. Do NOT use an"
-        Write-Warning "$(Get-TS): unpatched index as a RestoreHealth source for a patched host. Use -TrimMedia to emit"
-        Write-Warning "$(Get-TS): only the selected editions."
-    }
+    Show-EditionPlan -Images $WINOS_IMAGES -Selected $selected
 
     # WinRE is serviced ONCE and reused. It must come from a SELECTED edition - index 1 may
     # not be in the selection.

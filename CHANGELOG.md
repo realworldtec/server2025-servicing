@@ -8,6 +8,41 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [2.1.0] - 2026-07-13
+
+Edition selection was too blunt to trust. Reworked it.
+
+### Fixed
+- **`Win11-24H2` default `-SourceISO`** corrected to the real filename:
+  `D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64_dvd_59a1851e.iso`.
+- **Wildcard selection was a trap.** `-EditionName '*Pro*'` silently matched SIX editions
+  (Pro, Pro N, Pro Education, Pro Education N, Pro for Workstations, Pro N for Workstations).
+  Exact names now behave exactly (`'Windows 11 Pro'` does NOT match `'Windows 11 Pro N'`), and
+  wildcards are documented as broad.
+
+### Added
+- **`DefaultEditions` in `$PRODUCTS`** - per-product default selection using EXACT ImageNames,
+  overridable by `-Index` / `-EditionName`. Verified against the real media:
+  - `Server2025`  -> `$null` (all 4; the scheduled task relies on this)
+  - `Win11-25H2` / `Win11-24H2` -> Enterprise, Pro, Pro for Workstations
+    (both Win11 ISOs share an IDENTICAL index->name layout: 1 Education .. 10 Pro N for Workstations)
+- **`-ExcludeEditionName`** - subtract `-like` patterns from the selection, applied last.
+  e.g. `-EditionName '*Pro*' -ExcludeEditionName '*Education*'`
+- **`-ExcludeN`** - drop the N editions. Matches a **standalone, case-sensitive `N` token**,
+  because the N is not always trailing: *"Windows 11 Pro **N** for Workstations"*.
+- **`-AllEditions`** - ignore the product default and take everything.
+- **`-DryRun`** - resolve the selection against the SOURCE media, print which editions get
+  patched AND the resulting output index map, then exit. No download, no servicing. Preview
+  before committing to a multi-hour build.
+
+### Changed
+- Selection resolved by a single `Resolve-EditionSelection` function used by BOTH `-DryRun` and
+  the real servicing pass, so a dry run can never disagree with the build. Resolution order:
+  `-AllEditions` -> `-Index`/`-EditionName` (union) -> product `DefaultEditions` -> all;
+  then `-ExcludeEditionName` and `-ExcludeN` are subtracted.
+- `Show-EditionPlan` prints the full source list with PATCH markers plus the source->output
+  index map, and warns on mixed-build media.
+
 ## [2.0.0] - 2026-07-13
 
 **BREAKING**: `scripts/Slipstream-Server2025.ps1` is retired and replaced by
@@ -310,7 +345,8 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v2.0.0...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v2.1.0...HEAD
+[2.1.0]: https://example.com/server2025-servicing/compare/v2.0.0...v2.1.0
 [2.0.0]: https://example.com/server2025-servicing/compare/v1.3.1...v2.0.0
 [1.3.1]: https://example.com/server2025-servicing/compare/v1.3.0...v1.3.1
 [1.3.0]: https://example.com/server2025-servicing/compare/v1.2.4...v1.3.0

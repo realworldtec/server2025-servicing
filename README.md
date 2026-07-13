@@ -14,7 +14,7 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **2.0.0** — see [CHANGELOG.md](CHANGELOG.md).
+Version **2.1.0** — see [CHANGELOG.md](CHANGELOG.md).
 
 > **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
 > `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
