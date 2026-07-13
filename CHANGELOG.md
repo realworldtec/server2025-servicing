@@ -8,6 +8,74 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [2.1.3] - 2026-07-13
+
+### Fixed
+- **Output ISO filename was hardcoded to the Server product.** `Slipstream-WindowsMedia.ps1`
+  (→ v2.1.3) built the output path as `"Server2025_Patched_{0}.iso"` regardless of `-Product`,
+  so a Win11-25H2 build produced
+  `D:\Win11_25H2_Patching\Server2025_Patched_<stamp>.iso` — a correctly-built ISO with a
+  misleading name (the *volume label* was right; only the filename lied). Caught by a `-DryRun`.
+  The name is now derived from a new **`IsoPrefix`** field on each `$PRODUCTS` profile:
+
+  | Product      | Output ISO |
+  |--------------|------------|
+  | `Server2025` | `Server2025_Patched_<stamp>.iso`  *(unchanged — see below)* |
+  | `Win11-25H2` | `Win11_25H2_Patched_<stamp>.iso` |
+  | `Win11-24H2` | `Win11_24H2_Patched_<stamp>.iso` |
+
+  **`Server2025`'s prefix is load-bearing and must not change:**
+  `Watch-Server2025Updates.ps1` locates and archives the finished build by globbing
+  `Server2025_Patched_*.iso`. Renaming it would silently break the scheduled task (build
+  succeeds, archive finds nothing). A comment on the profile records this coupling. A future
+  Win11 detector must glob its own product's `IsoPrefix`.
+
+### Removed
+- **`scripts/Slipstream-Server2025.ps1`** — retired in 2.1.0 but never actually deleted, and
+  `README.md` / `docs/RUNBOOK.md` still told you to run it. It carried the old hardcoded ISO
+  name and none of the edition-selection work. Deleted; both docs now point at
+  `Slipstream-WindowsMedia.ps1 -Product Server2025`.
+
+### Docs
+- README: documented edition selection/trim, the `-ListEditions` → `-DryRun` → build habit,
+  and — importantly — that **`-TrimMedia` renumbers `install.wim`**, so any *index-based*
+  consumer (`autounattend.xml` `/IMAGE/INDEX`, MDT/SCCM, WDS, `dism /apply-image /index:N`)
+  must be updated from `EditionMap_<stamp>.json`. Also recorded that `boot.wim` (WinPE/Setup)
+  is a separate file and is **not** affected by the renumbering.
+
+## [2.1.2] - 2026-07-13
+
+### Fixed
+- **GATE FAIL (syntax): `Unexpected attribute 'SuppressMessageAttribute'`.** In 2.1.1 the
+  suppression attribute was placed **above** `function Get-FileResilient`, which is not a legal
+  attribute position in PowerShell. A `SuppressMessageAttribute` must sit **inside** the
+  function, attached to the `param()` block. Moved; noted in a comment so it is not repeated.
+
+  Worth recording plainly: this was a **syntax error introduced while trying to silence a linter
+  warning** - the AST parse caught it before the script ever ran. Second consecutive release in
+  which the quality gate stopped an author defect at the door rather than on a production host.
+
+## [2.1.1] - 2026-07-13
+
+Fixes found by the v1.3.0 quality gate on the v2.1.0 code. The gate caught a bug the author
+introduced - which is exactly why it exists.
+
+### Fixed
+- **GATE FAIL: `Stop-Transcript` inside a `finally` AND outside it** (the new
+  `-ListEditions`/`-DryRun` block). Same class of defect that turned a clean `exit 0` into `1`
+  in the detector (see 1.2.4). The `finally` now only dismounts the ISO; the transcript is
+  stopped by a single guarded call outside it.
+- **`PSReviewUnusedParameter` x5 was a real design smell, not noise.**
+  `Resolve-EditionSelection` was reaching up into script scope for `-Index` / `-EditionName` /
+  `-ExcludeEditionName` / `-ExcludeN` / `-AllEditions`. It worked (dynamic scoping) but was
+  fragile and untestable. The parameters are now packed into an explicit `$SELECTION` contract
+  built once and passed to the resolver, so both `-DryRun` and the real pass provably share it.
+- **`PSReviewUnusedParameter` on `Get-FileResilient`** is a genuine false positive (PSSA does
+  not trace into the scriptblock passed to `Invoke-Retry`). Documented in code with a
+  `SuppressMessageAttribute` + justification rather than silently ignored.
+
+Result: a clean gate - AST parse OK, no analyzer warnings, project rules pass.
+
 ## [2.1.0] - 2026-07-13
 
 Edition selection was too blunt to trust. Reworked it.
@@ -345,7 +413,9 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v2.1.0...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v2.1.2...HEAD
+[2.1.2]: https://example.com/server2025-servicing/compare/v2.1.1...v2.1.2
+[2.1.1]: https://example.com/server2025-servicing/compare/v2.1.0...v2.1.1
 [2.1.0]: https://example.com/server2025-servicing/compare/v2.0.0...v2.1.0
 [2.0.0]: https://example.com/server2025-servicing/compare/v1.3.1...v2.0.0
 [1.3.1]: https://example.com/server2025-servicing/compare/v1.3.0...v1.3.1

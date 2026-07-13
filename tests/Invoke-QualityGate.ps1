@@ -23,6 +23,11 @@
       * Native command (& foo.exe) inside a function without | Out-Null / | Out-Host. Native
         stdout is captured into the function's return value. (Real bug: DISM output polluted
         a boolean return.)
+      * A product literal ('Server2025', 'Win11', ...) used OUTSIDE the $PRODUCTS profile
+        table in a multi-product script. Whatever it configures will be wrong for every other
+        -Product. (Real bug: the output ISO was named Server2025_Patched_*.iso on a Win11
+        build - correct media, wrong name, and it would have been archived under the wrong
+        product.)
 
 .PARAMETER Path
     Repo root to scan. Defaults to the parent of this script.
@@ -36,7 +41,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.1.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -187,6 +192,45 @@ foreach ($f in $files) {
                 Write-Host ("  WARN  {0}:{1}  native '{2}' inside function '{3}' without | Out-Host/Out-Null" -f `
                     $f.Name, $c.Extent.StartLineNumber, $c.GetCommandName(), $fn.Name) -ForegroundColor Yellow
                 Write-Host "        Native stdout is captured into the function's RETURN VALUE." -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # --- Rule D: product-specific literal leaking outside the $PRODUCTS table -------
+    # v2.1.3: the output ISO name was hardcoded "Server2025_Patched_{0}.iso", so a Win11
+    # build emitted an ISO named Server2025_*. In a multi-product script, EVERY product
+    # detail must come from the $PRODUCTS profile. A bare product token anywhere else
+    # (outside param()/ValidateSet, which is legitimately a list of product names) means a
+    # detail was baked in and will be wrong for the other products.
+    $prodTable = @($ast.FindAll({
+        param($n)
+        $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $n.Left.VariablePath.UserPath -eq 'PRODUCTS'
+    }, $true))
+
+    if ($prodTable.Count -gt 0) {
+        # Offset ranges we're allowed to name products in: the table itself + the param block.
+        $safe = @()
+        foreach ($t in $prodTable) { $safe += , @($t.Extent.StartOffset, $t.Extent.EndOffset) }
+        $pb = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.ParamBlockAst] }, $false)
+        if ($pb) { $safe += , @($pb.Extent.StartOffset, $pb.Extent.EndOffset) }
+
+        $strs = @($ast.FindAll({
+            param($n)
+            $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $n.Value -match '(?i)server\s?20\d\d|win(dows)?[\s_-]?1[01]'
+        }, $true))
+
+        foreach ($s in $strs) {
+            $off = $s.Extent.StartOffset
+            $inSafe = $false
+            foreach ($r in $safe) { if ($off -ge $r[0] -and $off -le $r[1]) { $inSafe = $true; break } }
+            if (-not $inSafe) {
+                Write-Host ("  WARN  {0}:{1}  product literal '{2}' outside `$PRODUCTS" -f `
+                    $f.Name, $s.Extent.StartLineNumber, $s.Value) -ForegroundColor Yellow
+                Write-Host "        Multi-product script: this will be WRONG for every other -Product." -ForegroundColor Yellow
+                Write-Host "        Move it to the profile table and read it from `$P.<Field>." -ForegroundColor Yellow
             }
         }
     }

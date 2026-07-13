@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 2.1.0   (multi-product; refined edition selection)
+    Version    : 2.1.3   (multi-product; refined edition selection; product-derived ISO name)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -148,6 +148,9 @@ param(
 $PRODUCTS = @{
     'Server2025' = @{
         Label         = 'SERVER2025_PATCHED'
+        # IsoPrefix MUST stay 'Server2025_Patched': Watch-Server2025Updates.ps1 globs
+        # 'Server2025_Patched_*.iso' to find and archive the build. Changing it breaks the task.
+        IsoPrefix     = 'Server2025_Patched'
         BasePath      = 'D:\Server2025Patching'
         SourceISO     = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO'
         DefaultEditions = $null      # all 4 - the scheduled task relies on this
@@ -163,6 +166,7 @@ $PRODUCTS = @{
     }
     'Win11-25H2' = @{
         Label         = 'WIN11_25H2_PATCHED'
+        IsoPrefix     = 'Win11_25H2_Patched'
         BasePath      = 'D:\Win11_25H2_Patching'
         SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_25h2_x64_dvd_41c521e7.iso'
         DefaultEditions = @(
@@ -182,6 +186,7 @@ $PRODUCTS = @{
     }
     'Win11-24H2' = @{
         Label         = 'WIN11_24H2_PATCHED'
+        IsoPrefix     = 'Win11_24H2_Patched'
         BasePath      = 'D:\Win11_24H2_Patching'
         SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64_dvd_59a1851e.iso'
         DefaultEditions = @(
@@ -205,9 +210,20 @@ if (-not $SourceISO) { $SourceISO = $P.SourceISO }
 if (-not $BasePath)  { $BasePath  = $P.BasePath }
 if (-not $IsoLabel)  { $IsoLabel  = $P.Label }
 
+# Explicit selection contract, built ONCE from the parameters and passed to
+# Resolve-EditionSelection. Keeps the resolver free of hidden script-scope dependencies.
+$SELECTION = @{
+    Index              = $Index
+    EditionName        = $EditionName
+    ExcludeEditionName = $ExcludeEditionName
+    ExcludeN           = [bool]$ExcludeN
+    AllEditions        = [bool]$AllEditions
+    DefaultEditions    = $P.DefaultEditions
+}
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '2.1.0'
+$ScriptVersion          = '2.1.3'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -229,25 +245,31 @@ function Invoke-Retry {
 #  Edition selection. ONE resolver, used by both -DryRun (against the source media) and the
 #  real servicing pass (against \newMedia), so a dry run can never disagree with the build.
 # ---------------------------------------------------------------------------
+# $Spec is an explicit selection contract (built once from the script params below). The
+# function does NOT reach up into script scope - that made it fragile and untestable, and
+# PSScriptAnalyzer rightly flagged the params as "unused".
 function Resolve-EditionSelection {
-    param([Parameter(Mandatory)][object[]]$Images)
+    param(
+        [Parameter(Mandatory)][object[]]$Images,
+        [Parameter(Mandatory)][hashtable]$Spec
+    )
 
     $sel = @()
-    if ($AllEditions) {
+    if ($Spec.AllEditions) {
         $sel = $Images
     }
-    elseif ($Index -or $EditionName) {
-        if ($Index)       { $sel += @($Images | Where-Object { $Index -contains $_.ImageIndex }) }
-        if ($EditionName) {
-            foreach ($pat in $EditionName) {
+    elseif ($Spec.Index -or $Spec.EditionName) {
+        if ($Spec.Index) { $sel += @($Images | Where-Object { $Spec.Index -contains $_.ImageIndex }) }
+        if ($Spec.EditionName) {
+            foreach ($pat in $Spec.EditionName) {
                 $hit = @($Images | Where-Object { $_.ImageName -like $pat })
                 if ($hit.Count -eq 0) { Write-Warning "$(Get-TS): -EditionName '$pat' matched nothing." }
                 $sel += $hit
             }
         }
     }
-    elseif ($P.DefaultEditions) {
-        foreach ($nm in $P.DefaultEditions) {
+    elseif ($Spec.DefaultEditions) {
+        foreach ($nm in $Spec.DefaultEditions) {
             $hit = @($Images | Where-Object { $_.ImageName -eq $nm })   # EXACT, not -like
             if ($hit.Count -eq 0) {
                 Write-Warning "$(Get-TS): Product default edition '$nm' is not present in this media - skipped. (Media layout changed?)"
@@ -261,14 +283,14 @@ function Resolve-EditionSelection {
 
     $sel = @($sel | Sort-Object ImageIndex -Unique)
 
-    if ($ExcludeEditionName) {
-        foreach ($pat in $ExcludeEditionName) {
+    if ($Spec.ExcludeEditionName) {
+        foreach ($pat in $Spec.ExcludeEditionName) {
             $before = $sel.Count
             $sel = @($sel | Where-Object { $_.ImageName -notlike $pat })
             Write-Output "$(Get-TS): -ExcludeEditionName '$pat' removed $($before - $sel.Count) edition(s)."
         }
     }
-    if ($ExcludeN) {
+    if ($Spec.ExcludeN) {
         # Standalone 'N' token. Case-sensitive so a stray lowercase 'n' word can never match.
         # NOTE the N is not always trailing: "Windows 11 Pro N for Workstations".
         $before = $sel.Count
@@ -334,7 +356,7 @@ $WINRE_MOUNT  = Join-Path $WORKING  'WinREMount'
 $WINPE_MOUNT  = Join-Path $WORKING  'WinPEMount'
 $LOG_DIR      = Join-Path $BasePath 'logs'
 $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
-$OUTPUT_ISO   = Join-Path $BasePath ("Server2025_Patched_{0}.iso" -f $stamp)
+$OUTPUT_ISO   = Join-Path $BasePath ("{0}_{1}.iso" -f $P.IsoPrefix, $stamp)
 
 foreach ($d in @($BasePath,$PKG_ROOT,$CU_FOLDER,$SAFEOS_DIR,$SETUP_DIR,$DOTNET_DIR,$MEDIA_NEW,$WORKING,`
                  $MAIN_OS_MOUNT,$WINRE_MOUNT,$WINPE_MOUNT,$LOG_DIR)) {
@@ -384,16 +406,20 @@ if ($ListEditions -or $DryRun) {
         }
 
         if ($DryRun) {
-            $lsSel = @(Resolve-EditionSelection -Images $lsImages)
+            $lsSel = @(Resolve-EditionSelection -Images $lsImages -Spec $SELECTION)
             if ($lsSel.Count -eq 0) { throw "Selection matched nothing. Use -ListEditions to see what is available." }
             Show-EditionPlan -Images $lsImages -Selected $lsSel
             Write-Output "$(Get-TS): DRY RUN - nothing downloaded, nothing serviced. Re-run without -DryRun to build."
         }
     }
     finally {
+        # Do NOT Stop-Transcript in this finally. Elsewhere the trap and the end-of-script both
+        # stop it; mixing 'inside a finally' with 'outside' is precisely the pattern that turned
+        # a clean 'exit 0' into 1 in the detector (see CHANGELOG 1.2.4). Guarded stop below.
         Dismount-DiskImage -ImagePath $SourceISO | Out-Null
-        Stop-Transcript | Out-Null
     }
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Verbose "transcript already stopped" }
     exit 0
 }
 
@@ -543,7 +569,14 @@ function Get-CatalogDownloadUrl {
 }
 
 # Resilient download: BITS first (resumable), Invoke-WebRequest as fallback.
+# PSScriptAnalyzer flags $Url/$OutFile as unused: it does not trace variable use INTO the
+# scriptblock passed to Invoke-Retry. They ARE used there, the scriptblock closes over this
+# scope, and real builds have downloaded KB5094125 + its checkpoint through this path.
+# NOTE: a SuppressMessageAttribute must sit INSIDE the function, attached to param() -
+# placing it above 'function' is a syntax error ("Unexpected attribute").
 function Get-FileResilient {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '',
+        Justification = 'Used inside the scriptblock passed to Invoke-Retry; PSSA does not trace into scriptblock arguments. Verified by real builds.')]
     param([string]$Url,[string]$OutFile)
     Invoke-Retry -What "Download $(Split-Path $Url -Leaf)" -Script {
         try {
@@ -791,8 +824,8 @@ if ($installServiced) {
     $WINOS_IMAGES = @(Get-WindowsImage -ImagePath $INSTALL_WIM)
     Write-Output "$(Get-TS): install.wim contains $($WINOS_IMAGES.Count) edition(s)."
 
-    # ---- Resolve the selection (same resolver -DryRun used) -----------------------------
-    $selected = @(Resolve-EditionSelection -Images $WINOS_IMAGES)
+    # ---- Resolve the selection (same resolver + same spec that -DryRun used) ------------
+    $selected = @(Resolve-EditionSelection -Images $WINOS_IMAGES -Spec $SELECTION)
     if ($selected.Count -eq 0) { throw "Edition selection matched nothing. Run with -ListEditions to see what is available." }
     $selIdx = @($selected | ForEach-Object { $_.ImageIndex })
     Show-EditionPlan -Images $WINOS_IMAGES -Selected $selected

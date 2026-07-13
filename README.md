@@ -3,9 +3,10 @@
 Tooling to keep **Windows Server 2025 (24H2, build 26100)** installation media and
 component stores current and healthy:
 
-- **`Slipstream-Server2025.ps1`** — builds a fully-patched, bootable Server 2025 ISO from
-  the RTM media plus the latest cumulative/dynamic updates (auto-downloaded from the
-  Microsoft Update Catalog, or pre-staged offline).
+- **`Slipstream-WindowsMedia.ps1`** — builds a fully-patched, bootable ISO from RTM media plus
+  the latest cumulative/dynamic updates (auto-downloaded from the Microsoft Update Catalog, or
+  pre-staged offline). Products: `Server2025`, `Win11-25H2`, `Win11-24H2`. Supports patching a
+  **subset of editions** and optionally **trimming** the output media to just that subset.
 - **`Repair-Server2025Store.ps1`** — repairs a live server's component store from offline
   media (`install.wim` + Features-on-Demand ISO), with optional WinRE re-enable and
   ResetBase cleanup.
@@ -14,7 +15,7 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **2.1.0** — see [CHANGELOG.md](CHANGELOG.md).
+Version **2.1.3** — see [CHANGELOG.md](CHANGELOG.md).
 
 > **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
 > `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
@@ -74,14 +75,40 @@ server2025-servicing/
 
 ## Quick start
 
-**Build this month's patched ISO:**
+**Build this month's patched Server ISO:**
 
 ```powershell
-.\scripts\Slipstream-Server2025.ps1
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Server2025
 ```
 
 Output: `D:\Server2025Patching\Server2025_Patched_<stamp>.iso`. Re-runs auto-resume
 if a prior run already serviced `install.wim`; add `-Fresh` to force a clean rebuild.
+
+**Build a Windows 11 ISO with only selected editions (and trim the media to them):**
+
+```powershell
+# ALWAYS look first - never start a multi-hour build blind:
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -ListEditions
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -TrimMedia -DryRun
+
+# then build (defaults from the product profile: Enterprise, Pro, Pro for Workstations)
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -TrimMedia
+```
+
+Output: `D:\Win11_25H2_Patching\Win11_25H2_Patched_<stamp>.iso`.
+
+Edition selection resolves in this order: `-AllEditions` → `-Index` / `-EditionName` (union) →
+the profile's `DefaultEditions` (exact-name match) → all; then `-ExcludeEditionName` and
+`-ExcludeN` are subtracted. `-ExcludeN` matches `N` as a **case-sensitive standalone token**,
+so it correctly drops *Windows 11 Pro **N** for Workstations* without touching
+*Windows 11 Pro for Workstations*.
+
+> **`-TrimMedia` renumbers `install.wim`.** Anything that selects an edition *by index* —
+> `autounattend.xml` (`/IMAGE/INDEX`), MDT/SCCM task sequences, WDS, `dism /apply-image /index:N`
+> — must be updated. Each build writes **`EditionMap_<stamp>.json`** with the source→output
+> index map; use it. Interactive Setup is unaffected (it enumerates editions at run time).
+> `boot.wim` (WinPE/Setup) is a **separate file** and is *not* renumbered or otherwise
+> affected by trimming.
 
 **Repair a live server's store (mount patched ISO = F:, FoD ISO = G:):**
 

@@ -18,7 +18,7 @@ marker at `<OutputDir>\state\last-built.json`). Register it once with
 **To build on demand (bypasses the detector):**
 
 ```powershell
-.\scripts\Slipstream-Server2025.ps1
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Server2025
 ```
 
 What it does, unattended: downloads the current LCU (+ checkpoint), SafeOS DU, Setup DU and
