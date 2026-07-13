@@ -53,7 +53,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.3.1
+    Version : 1.3.2
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -139,6 +139,13 @@ if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
 Write-Host ""
 Write-Host "[3/4] Project rules" -ForegroundColor Cyan
 
+# A stage that prints NOTHING when it passes is indistinguishable from a stage that silently
+# did nothing - a skipped file, a `continue` that swallowed everything, a rule that never fired
+# because its AST predicate was wrong. Every other stage reports what it checked; so does this
+# one now. Count what we scan, count what we find, and say so.
+$rulesScanned  = 0
+$rulesFindings = 0
+
 foreach ($f in $files) {
     # Don't lint the gate with its own rules. Rule D exists to catch product literals leaking
     # into a script that CONSUMES the product config; this file VALIDATES that config, so the
@@ -147,6 +154,7 @@ foreach ($f in $files) {
     # becomes something you skim past.
     if ($f.FullName -eq $PSCommandPath) { continue }
 
+    $rulesScanned++
     $ast = $null
     try {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
@@ -180,6 +188,7 @@ foreach ($f in $files) {
         }
         if ($inFinally -gt 0 -and $outside -gt 0) {
             $failures++
+            $rulesFindings++
             Write-Host ("  FAIL  {0}: Stop-Transcript appears in a finally block AND outside it." -f $f.Name) -ForegroundColor Red
             Write-Host "        A redundant Stop-Transcript throws; a terminating error in finally overrides" -ForegroundColor Red
             Write-Host "        the exit code (clean 'exit 0' becomes 1). Let finally own the transcript." -ForegroundColor Red
@@ -191,6 +200,7 @@ foreach ($f in $files) {
     $lines = $text -split "`r?`n"
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\s*return\s*,\s*\$') {
+            $rulesFindings++
             Write-Host ("  WARN  {0}:{1}  'return ,`$var' - if the caller wraps this in @(), the array NESTS" -f $f.Name, ($i + 1)) -ForegroundColor Yellow
             Write-Host "        (.Count becomes 1 regardless). Use plain 'return `$var' + @() at the call site." -ForegroundColor Yellow
         }
@@ -208,6 +218,7 @@ foreach ($f in $files) {
             $pipe = $c.Parent   # PipelineAst
             $pipeText = if ($pipe) { $pipe.Extent.Text } else { $c.Extent.Text }
             if ($pipeText -notmatch 'Out-Null|Out-Host|Out-File|\>') {
+                $rulesFindings++
                 Write-Host ("  WARN  {0}:{1}  native '{2}' inside function '{3}' without | Out-Host/Out-Null" -f `
                     $f.Name, $c.Extent.StartLineNumber, $c.GetCommandName(), $fn.Name) -ForegroundColor Yellow
                 Write-Host "        Native stdout is captured into the function's RETURN VALUE." -ForegroundColor Yellow
@@ -236,6 +247,7 @@ foreach ($f in $files) {
                 # NOT *_PATH: $SAFE_OS_DU_PATH / $DOTNET_CU_PATH are single .msu/.cab FILES and
                 # are correct as -PackagePath targets. (v1.1.0 flagged them - false positive.)
                 if ($val -match '(?i)^\$\w*_(folder|dir)$') {
+                    $rulesFindings++
                     Write-Host ("  WARN  {0}:{1}  Add-WindowsPackage -PackagePath {2} looks like a FOLDER" -f `
                         $f.Name, $cmd.Extent.StartLineNumber, $val) -ForegroundColor Yellow
                     Write-Host "        Checkpoint CUs must be DISCOVERED, not applied explicitly. Pass the single" -ForegroundColor Yellow
@@ -293,6 +305,7 @@ foreach ($f in $files) {
             }
 
             if (-not $inSafe) {
+                $rulesFindings++
                 Write-Host ("  WARN  {0}:{1}  product literal '{2}' outside `$PRODUCTS" -f `
                     $f.Name, $s.Extent.StartLineNumber, $s.Value) -ForegroundColor Yellow
                 Write-Host "        Multi-product script: this will be WRONG for every other -Product." -ForegroundColor Yellow
@@ -300,6 +313,12 @@ foreach ($f in $files) {
             }
         }
     }
+}
+
+if ($rulesFindings -eq 0) {
+    Write-Host ("  ok    no findings ({0} script(s) scanned; rules A-E)" -f $rulesScanned) -ForegroundColor Green
+} else {
+    Write-Host ("  {0} finding(s) across {1} script(s)." -f $rulesFindings, $rulesScanned) -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------------------
