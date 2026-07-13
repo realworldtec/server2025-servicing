@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 2.1.3   (multi-product; refined edition selection; product-derived ISO name)
+    Version    : 2.1.4   (checkpoint CU applied per MS method: target LCU as sole target)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -223,7 +223,7 @@ $SELECTION = @{
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '2.1.3'
+$ScriptVersion          = '2.1.4'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -345,7 +345,7 @@ function Mount-IsoGetDrive {
 #  0.  Paths
 # ---------------------------------------------------------------------------
 $PKG_ROOT     = Join-Path $BasePath 'packages'
-$CU_FOLDER    = Join-Path $PKG_ROOT 'CU'          # LCU + checkpoint CUs ONLY (folder-based discovery)
+$CU_FOLDER    = Join-Path $PKG_ROOT 'CU'          # LCU + checkpoint CUs ONLY - no other .msu may live here
 $SAFEOS_DIR   = Join-Path $PKG_ROOT 'SafeOS_DU'   # SafeOS Dynamic Update (one file)
 $SETUP_DIR    = Join-Path $PKG_ROOT 'Setup_DU'    # Setup  Dynamic Update (one file)
 $DOTNET_DIR   = Join-Path $PKG_ROOT 'DotNet_CU'   # .NET Framework CU     (one file)
@@ -702,10 +702,18 @@ if ($ForceDownload -or -not $existingCU) {
     Write-Output "$(Get-TS): Using pre-staged CU package(s): $($existingCU.Name -join ', ')"
 }
 
-# Identify the TARGET LCU file (as opposed to its prerequisite checkpoint). WinRE and
-# WinPE must receive ONLY the target LCU - pushing the checkpoint (an RTM-baseline CU)
-# into the stripped-down boot images fails with 0x80073712. install.wim still gets the
-# whole folder (checkpoint discovery is required there because we add .NET/NetFx3).
+# Identify the TARGET LCU file (as opposed to its prerequisite checkpoint).
+#
+# The target LCU file is the SOLE -PackagePath target for ALL THREE images:
+#   - install.wim : DISM finds the checkpoint(s) sitting beside it in $CU_FOLDER and applies
+#                   them in order automatically. Passing the FOLDER instead applies the
+#                   checkpoint explicitly, which fails 0x80070228 (see the note at the
+#                   install.wim add, and MS "catalog-checkpoint-cumulative-updates" step 3).
+#   - boot.wim /
+#     winre.wim   : must receive ONLY the target LCU. Pushing the checkpoint (an RTM-baseline
+#                   CU) into the stripped-down boot images fails 0x80073712 (assembly missing).
+#
+# The checkpoint must still be PRESENT in $CU_FOLDER - it is required, just never named.
 $cuFiles = @(Get-ChildItem $CU_FOLDER -Filter *.msu -File -ErrorAction SilentlyContinue)
 $TARGET_LCU_FILE = $null
 if ($Script:LastPickedKB) {
@@ -874,10 +882,25 @@ foreach ($IMAGE in $selected) {
     # Put the serviced WinRE back into this edition
     Copy-Item "$WORKING\winre2.wim" "$MAIN_OS_MOUNT\windows\system32\recovery\winre.wim" -Force
 
-    # Step 9-13: main OS. Passing the CU FOLDER lets DISM discover + apply any
-    # checkpoint CUs first, then the target LCU (required because we add NetFX3).
-    Write-Output "$(Get-TS): Adding CU (checkpoint-aware) to main OS index $ix"
-    Add-WindowsPackage -Path $MAIN_OS_MOUNT -PackagePath $CU_FOLDER | Out-Null
+    # Step 9-13: main OS, checkpoint-aware.
+    #
+    # DO NOT pass $CU_FOLDER here. Microsoft's documented method is:
+    #   1. Put the target LCU *and all prior checkpoint CUs* in one folder, no other .msu.
+    #   2. Mount install.wim.
+    #   3. "Run DISM /add-package with the latest .msu file as the SOLE TARGET."
+    # DISM then discovers the checkpoints sitting beside the target and applies them in the
+    # correct order, in one go.  ($CU_FOLDER holds ONLY the LCU + checkpoints, satisfying 1.)
+    #
+    # Passing the FOLDER makes DISM enumerate and apply each .msu EXPLICITLY, including the
+    # checkpoint. Applying the checkpoint MSU explicitly fails:
+    #     0x80070228 / Error 552 - "An error occurred applying the Unattend.xml file from
+    #     the .msu package."  ("The passed ACL did not contain the minimum required
+    #     information.")
+    # Confirmed broken for every LCU since 2025-05 and reproduced on the 25H2 build
+    # 2026-07-12 (KB5094126 + checkpoint KB5043080), ~30 min into the run.
+    # Refs: catalog-checkpoint-cumulative-updates (step 3) + MS Q&A 3855149.
+    Write-Output "$(Get-TS): Adding CU (checkpoint-aware, target LCU as sole target) to main OS index $ix"
+    Add-WindowsPackage -Path $MAIN_OS_MOUNT -PackagePath $TARGET_LCU_FILE | Out-Null
 
     # Step 14: cleanup (tolerate CBS_E_PENDING from offline feature adds)
     Write-Output "$(Get-TS): Cleanup main OS index $ix"

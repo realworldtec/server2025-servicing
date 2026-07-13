@@ -196,6 +196,33 @@ foreach ($f in $files) {
         }
     }
 
+    # --- Rule E: Add-WindowsPackage -PackagePath pointing at a FOLDER ---------------
+    # Microsoft's checkpoint-CU method (catalog-checkpoint-cumulative-updates, step 3) is:
+    # put the target LCU + all prior checkpoints in one folder, then run /add-package with
+    # "the latest .msu file as the SOLE TARGET". DISM discovers the checkpoints itself.
+    # Passing the FOLDER makes DISM apply the checkpoint EXPLICITLY -> 0x80070228,
+    # "An error occurred applying the Unattend.xml file from the .msu package."
+    # Cost when this regressed: ~30 min of servicing before it threw.
+    foreach ($cmd in @($ast.FindAll({
+        param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and
+        $n.GetCommandName() -eq 'Add-WindowsPackage'
+    }, $true))) {
+        for ($k = 0; $k -lt $cmd.CommandElements.Count - 1; $k++) {
+            $el = $cmd.CommandElements[$k]
+            if ($el -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $el.ParameterName -eq 'PackagePath') {
+                $val = $cmd.CommandElements[$k + 1].Extent.Text
+                if ($val -match '(?i)_?(folder|dir|path)\b' -and $val -notmatch '(?i)file') {
+                    Write-Host ("  WARN  {0}:{1}  Add-WindowsPackage -PackagePath {2} looks like a FOLDER" -f `
+                        $f.Name, $cmd.Extent.StartLineNumber, $val) -ForegroundColor Yellow
+                    Write-Host "        Checkpoint CUs must be DISCOVERED, not applied explicitly. Pass the single" -ForegroundColor Yellow
+                    Write-Host "        target LCU .msu; leave the checkpoints beside it. Folder => 0x80070228." -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+
     # --- Rule D: product-specific literal leaking outside the $PRODUCTS table -------
     # v2.1.3: the output ISO name was hardcoded "Server2025_Patched_{0}.iso", so a Win11
     # build emitted an ISO named Server2025_*. In a multi-product script, EVERY product
