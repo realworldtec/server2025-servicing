@@ -50,7 +50,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 
 if (-not (Test-Path $WimPath)) { throw "Image not found: $WimPath" }
 if (-not (Test-Path $MountPath)) { New-Item -ItemType Directory -Path $MountPath -Force | Out-Null }
@@ -68,18 +68,42 @@ try {
         }
         if ($File) {
             foreach ($f in $File) {
-                $hit = Get-ChildItem $dir -Filter $f -ErrorAction SilentlyContinue
-                if ($hit) { $hit | ForEach-Object { Write-Host ("  FOUND  {0}  ({1} bytes)" -f $_.FullName, $_.Length) } }
+                # -File, and -like rather than -Filter. -Filter goes through the Win32 name
+                # matcher, which also matches 8.3 SHORT names: '*.mof' would match
+                # payload.mofdata (short name PAYLOA~1.MOF). For a go/no-go gate, a false
+                # FOUND is the worst possible outcome. -like does no short-name matching.
+                $hit = @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $f })
+                if ($hit.Count -gt 0) { $hit | ForEach-Object { Write-Host ("  FOUND  {0}  ({1} bytes)" -f $_.FullName, $_.Length) } }
                 else { Write-Warning "  MISSING file '$f' in $c"; $allPresent = $false }
             }
         } else {
-            Get-ChildItem $dir -File | Select-Object -First 20 | ForEach-Object {
+            # A component DIRECTORY that exists but is EMPTY used to print nothing, leave
+            # $allPresent = $true, and report "all requested payloads present". That is exactly
+            # the false green this tool exists to prevent: 0x800f0915 is a missing PAYLOAD, not
+            # a missing folder. The operator would then commit to a multi-hour DISM run against
+            # a source that cannot repair anything.
+            $files = @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) {
+                Write-Warning "EMPTY component (folder present, NO payload): $c"
+                $allPresent = $false
+                continue
+            }
+            $files | Select-Object -First 20 | ForEach-Object {
                 Write-Host ("  FOUND  {0}  ({1} bytes)" -f $_.Name, $_.Length)
             }
         }
     }
 } finally {
-    Dismount-WindowsImage -Path $MountPath -Discard | Out-Null
+    # Guarded: with $ErrorActionPreference='Stop', a dismount failure (a handle held on the
+    # mount dir by AV or Explorer is routine) throws OUT OF the finally, the exit line below
+    # never runs, and the process exits 1 - making a clean "all present" run indistinguishable
+    # from a crash, while leaving the WIM mounted so the next run dies at Mount-WindowsImage.
+    try { Dismount-WindowsImage -Path $MountPath -Discard | Out-Null }
+    catch {
+        Write-Warning "Dismount failed: $($_.Exception.Message)"
+        Write-Warning "Run: Clear-WindowsCorruptMountPoint   (the image is still mounted at $MountPath)"
+        $allPresent = $false
+    }
 }
 
 if ($allPresent) { Write-Host "RESULT: all requested payloads present - this image is a valid RestoreHealth /Source." -ForegroundColor Green }

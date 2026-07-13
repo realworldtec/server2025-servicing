@@ -8,6 +8,147 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [3.0.0] - 2026-07-13 — full logic review
+
+Every script was read line-by-line for **logic** defects (the quality gate only catches syntax
+and known footguns). This is the result. Several of these were latent time bombs; two would have
+silently shipped month-old media with green logs. Major bump: behaviour changes, and the
+scheduled task must be re-registered.
+
+### Fixed — CRITICAL
+
+- **`Slipstream-WindowsMedia.ps1` (→ v3.0.0): stale CU packages were reused forever, silently.**
+  Nothing ever cleaned `\packages`, and the script skipped the Catalog entirely whenever every
+  package folder was non-empty (*"All update packages already staged"*). So the month after a
+  successful build: the detector spots a new LCU → launches the slipstream → the slipstream goes
+  **offline**, reuses **last month's** `.msu`, and builds the wrong month — while the detector
+  stamps `last-built.json` with the **new** build. The new LCU is then marked built and **never
+  built again**. With v2.2.0's guard it got worse: instant "ALREADY BUILT", exit 0, no ISO at all.
+  Now: the Catalog is **always** probed, the LCU is **always** identified, and staged packages
+  are kept only if they *are* that LCU — otherwise they are purged and re-downloaded.
+
+- **`Slipstream-WindowsMedia.ps1`: the resume marker carried no build identity.** It held a
+  timestamp and short-circuited *before* the version check. A run that serviced `install.wim` for
+  LCU **A** and then died at `oscdimg` left a marker that made the next run — now targeting LCU
+  **B** — skip `install.wim` servicing entirely. Result: an ISO whose `install.wim` is a month
+  old while `boot.wim`/Setup carry the new LCU. Exit 0. The marker now records the **build**, and
+  is ignored (and deleted) when the target differs.
+
+- **`Slipstream-WindowsMedia.ps1`: verification printed the build and never checked it.** The one
+  step that could catch every silent-bad-ISO path did nothing with its result. It is now a
+  **hard assertion**: the shipped `install.wim` must carry a build ≥ the target LCU, or the run
+  **throws** — *before* the manifest is written, so a bad build can never poison the ALREADY-BUILT
+  guard and the detector will not stamp state. It also now versions **every** shipped index:
+  reading index 1 alone reported the *RTM* build on any non-trimmed subset build.
+
+- **`Repair-Server2025Store.ps1` (→ v1.1.0): always exited 0, even on total failure.** There was
+  no `exit` statement in the script at all, and the `catch` swallowed the error — so a failed
+  `RestoreHealth`, a pending-reboot abort, "no source found", and a FATAL crash **all reported
+  success**. Any wrapper gating on `$LASTEXITCODE` recorded "repaired" for a store that was never
+  touched. Now returns 1 on any failure.
+
+- **`Check-Packages.ps1` (→ v1.1.0): reported "all payloads present" for an EMPTY component
+  folder.** The no-`-File` branch only tested that the *directory* existed and never touched
+  `$allPresent`. That is exactly the false green this tool exists to prevent — `0x800f0915` is a
+  missing **payload**, not a missing folder — and it would send you into a multi-hour DISM run
+  against a source that cannot repair anything.
+
+### Fixed — HIGH
+
+- **`Watch-Server2025Updates.ps1` (→ v1.2.0) archived an ISO it never verified.** The only check
+  was "some ISO exists in the folder". It now requires the slipstream's manifest, and refuses to
+  archive or stamp state unless `ActualBuild` ≥ the build it detected.
+- **`Slipstream…`: `$Script:LastPickedKB/Build` were clobbered by every later Catalog search.**
+  The SafeOS DU, Setup DU and .NET CU searches each overwrote the shared variable, so downstream
+  consumers read the **.NET CU's** KB, not the LCU's. Split into `Select-CatalogUpdate` (pick,
+  no side effects) + `Save-CatalogPick`; only the LCU call site sets `$Script:TargetKB/TargetBuild`.
+- **`Slipstream…`: a stale `.target.json` was trusted blindly.** Hand-staging a newer LCU while an
+  old `.target.json` remained would make the guard "already build" a build that never happened.
+  The restored identity is now corroborated against the `.msu` files actually on disk.
+- **`Slipstream…`: the ALREADY-BUILT guard ignored the edition selection**, so asking for a
+  Pro-only ISO right after building an Enterprise-only ISO of the same LCU silently produced
+  nothing. It now stands down whenever an explicit selection switch is passed. **`-Rebuild` now
+  also invalidates the resume marker** — previously it bypassed only the guard, so the run reused
+  the old edition set and silently ignored `-TrimMedia`/`-EditionName`.
+- **`Slipstream…`: the resume marker lived inside `\newMedia`** and was deleted just before
+  `oscdimg`. An oscdimg or verification failure therefore threw away a fully-serviced
+  `install.wim` and cost a **full 4-hour re-service**. It now lives in `$BasePath` and survives.
+
+### Fixed — MEDIUM
+
+- **`-KeepLast 0` deleted every archived ISO, including the one just copied** (`Select-Object
+  -Skip 0` skips nothing), then stamped state as a successful build. Now `[ValidateRange(1,999)]`
+  in both the detector and the registrar.
+- **`Watch…`: `-MonthlyOnly` used exact date equality** against the Catalog's "Last Updated"
+  column — which is a *re-publish* date and has been observed a day off. One day of drift meant
+  the month's security media was skipped, and because state was never stamped, it skipped again
+  every single day thereafter. Now a 7-day patch-Tuesday **window**.
+- **`Watch…`: a broken Catalog parser was a permanent, silent no-op.** `exit 0` every day forever,
+  green task history, no media. Now counts consecutive misses and **exits 2** after three.
+- **`Watch…`** archived the build log from the wrong directory (the slipstream writes to
+  `<BasePath>\logs`, not the detector's `-LogDir`); now also archives the manifest beside the ISO
+  and prunes orphaned manifests. `-File` added to all `Get-ChildItem` globs.
+- **`Register-SlipstreamSchedule.ps1` (→ v1.3.0):** a trailing backslash in any path argument
+  (`-ShareRoot 'D:\PatchedImages\'`) produced `..."D:\PatchedImages\"` — `CommandLineToArgvW`
+  reads `\"` as an escaped quote, so the quoted region never closed and every later parameter was
+  swallowed. The task registered cleanly and misbehaved at 02:00. Paths are now `TrimEnd('\')`ed.
+- **`Register…`:** the hard-coded `-SourceISO` default made the "omit it" path unreachable and
+  **refused to register the task at all** on any host without that exact ISO path. Now defaults to
+  empty. `-RunAsUser 'NT AUTHORITY\SYSTEM'` no longer prompts for an impossible password.
+  `$PSScriptRoot` replaces `$MyInvocation.MyCommand.Path`.
+- **`Check-Packages…`:** `-Filter` matched 8.3 short names (`*.mof` matches `payload.mofdata` via
+  `PAYLOA~1.MOF`) — a **false FOUND** in a go/no-go gate. Now uses `-like`. `Dismount-WindowsImage`
+  in `finally` is guarded so a locked mount can no longer flip a clean run to exit 1.
+- **`Slipstream…`:** Catalog pick now tie-breaks on KB number within a month. Previously a month
+  containing both an out-of-band CU and the Patch-Tuesday LCU was resolved by `Sort-Object`
+  stability — i.e. arbitrarily — so it could spend four hours slipstreaming the wrong CU.
+- **`Slipstream…`:** the final `Stop-Transcript` was unguarded, under `ErrorActionPreference=Stop`
+  with a `trap` that exits 1 — a throw there would have turned a good 4-hour build into a failure,
+  and the detector would have rebuilt it the next day. Guarded; explicit `exit 0` added.
+
+## [2.1.4] - 2026-07-13
+
+### Fixed
+- **BUILD FAILURE: `0x80070228` — "An error occurred applying the Unattend.xml file from the
+  .msu package"** when servicing `install.wim`. `Slipstream-WindowsMedia.ps1` (→ v2.1.4) passed
+  the **CU folder** to `Add-WindowsPackage -PackagePath`, on the belief that this let DISM
+  "auto-discover" the checkpoint CU. That belief was wrong, and it is the opposite of what
+  Microsoft documents.
+
+  Microsoft's method
+  ([catalog-checkpoint-cumulative-updates](https://learn.microsoft.com/en-us/windows/deployment/update/catalog-checkpoint-cumulative-updates),
+  step 3) is: put the target LCU **and all prior checkpoint CUs** in one folder with no other
+  `.msu`, then *"run `DISM /add-package` with the **latest `.msu` file as the sole target**."*
+  DISM discovers the checkpoints sitting **beside** the target and applies them in order, in one
+  go. Naming the folder instead makes DISM enumerate and apply **each** `.msu` explicitly — and
+  applying a checkpoint MSU explicitly fails with `0x80070228` / Win32 `552` ("The passed ACL did
+  not contain the minimum required information").
+
+  This has been broken for every LCU since **2025-05** and is confirmed by others against the
+  identical file (`windows11.0-kb5043080-x64_9534496…msu`) in
+  [MS Q&A 3855149](https://learn.microsoft.com/en-us/answers/questions/3855149/check-please-on-windows11-0-kb5043080-x64-95344967).
+  It surfaced here on the Win11-25H2 build of 2026-07-12 (KB5094126 + checkpoint KB5043080) —
+  **~30 minutes into the run**, after WinRE had already been serviced.
+
+  `$TARGET_LCU_FILE` is now the sole `-PackagePath` target for **all three** images. The
+  checkpoint is still downloaded and must still be present in `$CU_FOLDER` — it is required,
+  just never named. `$CU_FOLDER` still contains *only* the LCU + checkpoints (Setup DU, SafeOS DU
+  and the .NET CU live in their own folders), which satisfies Microsoft's step 1.
+
+### Added
+- **Quality gate Rule E** (`tests/Invoke-QualityGate.ps1` → v1.2.0): flags
+  `Add-WindowsPackage -PackagePath <$*_FOLDER / $*_DIR>`. Checkpoint CUs must be *discovered*,
+  never applied explicitly.
+
+### Fixed (quality gate — false positives in v1.1.0)
+- **Rule E** matched on the substring `PATH` in the *variable name*, flagging
+  `$SAFE_OS_DU_PATH` and `$DOTNET_CU_PATH` — which are single `.msu`/`.cab` **files** and are
+  correct as `-PackagePath` targets. Now only a variable whose name **ends** in `_FOLDER` or
+  `_DIR` trips it.
+- **Rule D** flagged a product name inside a `Write-Output` usage hint. A product literal in
+  **console text** is fine; only a literal in a **value** can misconfigure another `-Product`.
+  Literals whose enclosing command is a `Write-*` are now ignored.
+
 ## [2.1.3] - 2026-07-13
 
 ### Fixed

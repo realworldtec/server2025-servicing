@@ -66,9 +66,9 @@ param(
     [string]$WatchScript,
     [string]$SlipstreamScript,
     [string]$OutputDir = 'D:\Server2025Patching',
-    [string]$SourceISO = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO',
+    [string]$SourceISO = '',   # empty => let the slipstream's per-product default apply
     [string]$StateFile,
-    [int]$KeepLast     = 12,
+    [ValidateRange(1,999)][int]$KeepLast     = 12,
     [string]$Time      = '02:00',
     [switch]$MonthlyOnly,
     [switch]$NoProxy,
@@ -77,8 +77,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.2.0'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptVersion = '1.3.0'
+$here = $PSScriptRoot
 $repo = Split-Path $here -Parent
 
 if (-not $WatchScript)      { $WatchScript      = Join-Path $repo 'scripts\Watch-Server2025Updates.ps1' }
@@ -95,6 +95,15 @@ if ($SourceISO) {
 }
 
 # --- Build the detector command line the task will run -------------------------
+# Strip trailing backslashes FIRST. A perfectly ordinary -ShareRoot 'D:\PatchedImages\' would
+# otherwise emit  -ShareRoot "D:\PatchedImages\"  and CommandLineToArgvW treats the \" as an
+# escaped quote: the quoted region never closes, ShareRoot swallows the rest of the command
+# line, and the task silently misbehaves at 02:00.
+foreach ($v in 'ShareRoot','OutputDir','StateFile','SourceISO','WatchScript','SlipstreamScript') {
+    $cur = Get-Variable -Name $v -ValueOnly -ErrorAction SilentlyContinue
+    if ($cur -is [string] -and $cur) { Set-Variable -Name $v -Value $cur.TrimEnd('\') }
+}
+
 $arg = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -SlipstreamScript "{1}" -OutputDir "{2}" -StateFile "{3}" -KeepLast {4} -ShareRoot "{5}"' -f `
         $WatchScript, $SlipstreamScript, $OutputDir, $StateFile, $KeepLast, $ShareRoot
 if ($SourceISO)   { $arg += ' -SourceISO "{0}"' -f $SourceISO }
@@ -110,7 +119,7 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
 $desc = "Daily Server 2025 update detector; builds patched ISO when a new LCU publishes. server2025-servicing v$ScriptVersion."
 
 $common = @{ TaskName = $TaskName; Action = $action; Trigger = $trigger; Settings = $settings; Description = $desc; RunLevel = 'Highest'; Force = $true }
-if ($RunAsUser -eq 'SYSTEM') {
+if ($RunAsUser -match '^(NT AUTHORITY\\)?SYSTEM$') {
     Register-ScheduledTask @common -User 'NT AUTHORITY\SYSTEM' | Out-Null
 } else {
     $cred = Get-Credential -UserName $RunAsUser -Message "Password for scheduled-task run-as account ($RunAsUser)"

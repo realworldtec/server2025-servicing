@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 2.2.0   (pre-flight ALREADY-BUILT guard; target identity survives pre-staged runs)
+    Version    : 3.0.0   (correctness pass: stale-CU purge, build-stamped resume, hard verify)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -227,7 +227,7 @@ $SELECTION = @{
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '2.2.0'
+$ScriptVersion          = '3.0.0'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -593,15 +593,19 @@ function Get-FileResilient {
     }
 }
 
-# Pick the newest catalog update matching filters, download all of its files.
-# Returns the number of files in $Destination afterward. Uses Write-Host for logging
-# (this function returns a value, so Write-Output would pollute it).
-function Save-CatalogUpdate {
+# Pick the newest catalog update matching filters. Returns the pick object (or $null when
+# -Optional and nothing matched). Deliberately does NOT download and does NOT set any script
+# state: the caller decides what to do with the pick.
+#
+# It also does NOT touch $Script:TargetKB/$Script:TargetBuild. It used to: every call - the
+# LCU, the SafeOS DU, the Setup DU, the .NET CU - overwrote a shared $Script:LastPickedKB, so
+# by the time anything downstream read it, it held the KB of the LAST package searched (.NET),
+# not the LCU. Every manifest recorded the wrong KB. Only the LCU call site sets the target.
+function Select-CatalogUpdate {
     param(
         [Parameter(Mandatory)][string]$Query,
         [Parameter(Mandatory)][string]$IncludeRegex,
         [string]$ExcludeRegex = '(?!)',
-        [Parameter(Mandatory)][string]$Destination,
         [switch]$Optional
     )
     Write-Host "$(Get-TS): Catalog search -> '$Query'"
@@ -617,23 +621,49 @@ function Save-CatalogUpdate {
     }
     if ($rows | Where-Object { $_.Title -match 'x64' }) { $rows = $rows | Where-Object { $_.Title -match 'x64' } }
     if (-not $rows) {
-        if ($Optional) { Write-Warning "$(Get-TS): No catalog match for '$Query' (optional) - skipping."; return 0 }
+        if ($Optional) { Write-Warning "$(Get-TS): No catalog match for '$Query' (optional) - skipping."; return $null }
         throw "No catalog result for '$Query' matching /$IncludeRegex/."
     }
-    $pick = $rows | Sort-Object YearMonth -Descending | Select-Object -First 1
+    # Tie-break WITHIN a month on the KB number. A month that carries both an out-of-band CU and
+    # the Patch-Tuesday LCU used to be resolved by Sort-Object's stability - i.e. by whatever
+    # order the Catalog happened to return - which could send us slipstreaming the wrong CU for
+    # four hours.
+    $pick = $rows |
+            Sort-Object YearMonth, @{ Expression = { if ($_.Title -match 'KB(\d+)') { [int]$Matches[1] } else { 0 } } } -Descending |
+            Select-Object -First 1
     Write-Host "$(Get-TS): Selected: $($pick.Title)  [$($pick.Guid)]"
-    # Record the picked target's KB + build (used to identify the target LCU file vs its
-    # checkpoint, and to detect an already-serviced install.wim for resume).
-    if ($pick.Title -match 'KB(\d+)')            { $Script:LastPickedKB    = "kb$($Matches[1])" }
-    if ($pick.Title -match '\((\d{5}\.\d+)\)')   { $Script:LastPickedBuild = "10.0.$($Matches[1])" }
-    $urls = Get-CatalogDownloadUrl -Guid $pick.Guid
-    if (-not $urls) { throw "Could not resolve download URLs for '$($pick.Title)'." }
+    return $pick
+}
+
+# Download every file belonging to an already-selected pick into $Destination.
+function Save-CatalogPick {
+    param(
+        [Parameter(Mandatory)]$Pick,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $urls = Get-CatalogDownloadUrl -Guid $Pick.Guid
+    if (-not $urls) { throw "Could not resolve download URLs for '$($Pick.Title)'." }
     foreach ($u in $urls) {
         $name = (($u -split '/')[-1]) -replace '\?.*$',''
         Write-Host "$(Get-TS): Downloading $name"
         Get-FileResilient -Url $u -OutFile (Join-Path $Destination $name) | Out-Null
     }
     return [int](Get-ChildItem $Destination -File).Count
+}
+
+# Convenience: select + download in one step (used for the DUs and the .NET CU, none of which
+# define the target identity).
+function Save-CatalogUpdate {
+    param(
+        [Parameter(Mandatory)][string]$Query,
+        [Parameter(Mandatory)][string]$IncludeRegex,
+        [string]$ExcludeRegex = '(?!)',
+        [Parameter(Mandatory)][string]$Destination,
+        [switch]$Optional
+    )
+    $pick = Select-CatalogUpdate -Query $Query -IncludeRegex $IncludeRegex -ExcludeRegex $ExcludeRegex -Optional:$Optional
+    if (-not $pick) { return 0 }
+    return Save-CatalogPick -Pick $pick -Destination $Destination
 }
 
 # Lightweight reachability probe (decides catalog vs. pre-staged fallback).
@@ -678,65 +708,98 @@ $(Get-TS): =====================================================================
 "@
 }
 
-# Only probe the Catalog if something actually needs downloading. This avoids the slow
-# reachability retries on a resume/re-run where every package is already staged.
-$cuStaged    = @(Get-ChildItem $CU_FOLDER  -Filter *.msu -File -ErrorAction SilentlyContinue).Count -gt 0
-$safeStaged  = @(Get-ChildItem $SAFEOS_DIR -File -ErrorAction SilentlyContinue).Count -gt 0
-$setupStaged = @(Get-ChildItem $SETUP_DIR  -File -ErrorAction SilentlyContinue).Count -gt 0
-$dnStaged    = @(Get-ChildItem $DOTNET_DIR -File -ErrorAction SilentlyContinue).Count -gt 0
-if ($ForceDownload -or -not ($cuStaged -and $safeStaged -and $setupStaged -and $dnStaged)) {
-    $haveCatalog = Test-Catalog
-} else {
-    Write-Output "$(Get-TS): All update packages already staged - skipping Catalog reachability probe."
-    $haveCatalog = $false
-}
+# ALWAYS probe the Catalog. The old code skipped the probe entirely when every package folder
+# was non-empty ("All update packages already staged"), which was a correctness disaster:
+# nothing ever cleans \packages, so LAST MONTH'S .msu lived there forever. The next month the
+# detector would spot a new LCU, launch this script, and this script would go OFFLINE, reuse the
+# STALE CU, and cheerfully build (or, with the new guard, no-op on) the wrong month - while the
+# detector stamped state\last-built.json with the NEW build. The new LCU would then be marked
+# built and never built again. Green logs, month-old media.
+#
+# The probe + LCU search is metadata only (seconds). It is not worth being clever about.
+$haveCatalog = Test-Catalog
 
 # --- Latest Cumulative Update (+ checkpoints)  -> CU_FOLDER --------------------
-$existingCU = Get-ChildItem $CU_FOLDER -Filter *.msu -ErrorAction SilentlyContinue
-if ($ForceDownload -or -not $existingCU) {
-    Get-ChildItem $CU_FOLDER -File -ErrorAction SilentlyContinue | Remove-Item -Force
-    if (-not $haveCatalog) { Show-PrestageHelp; throw "Catalog unreachable and no LCU pre-staged in $CU_FOLDER." }
+# Contract: the CU folder must contain the CURRENT target LCU + its checkpoint(s), and nothing
+# else. We (a) find out what the current LCU is, (b) keep the staged files ONLY if they are that
+# LCU, (c) otherwise purge and re-download.
+$existingCU = @(Get-ChildItem $CU_FOLDER -Filter *.msu -File -ErrorAction SilentlyContinue)
+$lcuPick    = $null
+if ($haveCatalog) {
     # Non-preview security LCU for the selected product, x64. Its download dialog includes any
     # prerequisite checkpoint .msu(s) (24H2/25H2 lineage both use checkpoint CUs).
-    Save-CatalogUpdate -Query $P.LcuQuery `
-        -IncludeRegex $P.LcuInclude `
-        -ExcludeRegex '\.NET|Preview|Dynamic' `
-        -Destination $CU_FOLDER | Out-Null
-} else {
-    Write-Output "$(Get-TS): Using pre-staged CU package(s): $($existingCU.Name -join ', ')"
+    $lcuPick = Select-CatalogUpdate -Query $P.LcuQuery `
+                   -IncludeRegex $P.LcuInclude `
+                   -ExcludeRegex '\.NET|Preview|Dynamic'
+}
+
+if ($lcuPick) {
+    # THE target identity. Set here and nowhere else.
+    if ($lcuPick.Title -match 'KB(\d+)')          { $Script:TargetKB    = "kb$($Matches[1])" }
+    if ($lcuPick.Title -match '\((\d{5}\.\d+)\)') { $Script:TargetBuild = "10.0.$($Matches[1])" }
+    if (-not $Script:TargetKB) { throw "Could not extract a KB number from the selected LCU: $($lcuPick.Title)" }
+
+    $stagedIsCurrent = @($existingCU | Where-Object { $_.Name -match $Script:TargetKB }).Count -gt 0
+    if ($ForceDownload -or -not $stagedIsCurrent) {
+        if ($existingCU.Count -gt 0) {
+            Write-Warning "$(Get-TS): Staged CU packages do not contain the current LCU ($($Script:TargetKB)) - purging stale packages."
+            Write-Warning "$(Get-TS): Purging: $($existingCU.Name -join ', ')"
+        }
+        Get-ChildItem $CU_FOLDER -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        Save-CatalogPick -Pick $lcuPick -Destination $CU_FOLDER | Out-Null
+    } else {
+        Write-Output "$(Get-TS): Staged CU already IS the current LCU ($($Script:TargetKB)) - skipping download."
+    }
+}
+elseif ($existingCU.Count -gt 0) {
+    # Offline with packages on disk. Legitimate (air-gapped builds), but we cannot confirm the
+    # staged LCU is current. Identity comes from .target.json below, and is validated against
+    # the files actually present.
+    Write-Warning "$(Get-TS): Catalog unreachable - falling back to PRE-STAGED CU packages. This build may not be current."
+    Write-Output  "$(Get-TS): Pre-staged CU package(s): $($existingCU.Name -join ', ')"
+}
+else {
+    Show-PrestageHelp
+    throw "Catalog unreachable and no LCU pre-staged in $CU_FOLDER."
 }
 
 # ---- Target identity (KB + build), persisted beside the packages --------------
-# $Script:LastPickedKB / $Script:LastPickedBuild are set ONLY by the Catalog search. On a
-# PRE-STAGED or offline re-run the Catalog is never queried ("All update packages already
-# staged - skipping Catalog reachability probe"), so both are $null. That silently disabled:
-#   * the target-LCU match  -> "Target LCU KB not known; using largest CU file as target"
-#   * the RESUME check      -> $TARGET_BUILD was $null, so it never ran and every edition was
-#                              re-serviced from scratch (~4 h on Server 2025).
-#   * the ALREADY-BUILT guard below.
-# Fix: write the identity next to the packages it describes, and restore it when re-running.
+# The identity is what every downstream decision keys off: which .msu is the target LCU, whether
+# \newMedia can be resumed, and whether this build already exists. It MUST survive an offline
+# re-run, and it MUST NOT be trusted blindly - a stale .target.json next to fresh hand-staged
+# packages would make us "already built" a build we never built.
 $TARGET_JSON = Join-Path $CU_FOLDER '.target.json'
-if ($Script:LastPickedKB -and $Script:LastPickedBuild) {
+if ($Script:TargetKB -and $Script:TargetBuild) {
     [pscustomobject]@{
-        KB       = $Script:LastPickedKB
-        Build    = $Script:LastPickedBuild
+        KB       = $Script:TargetKB
+        Build    = $Script:TargetBuild
         PickedAt = (Get-TS)
     } | ConvertTo-Json | Set-Content -Path $TARGET_JSON -Encoding UTF8
 }
 elseif (Test-Path $TARGET_JSON) {
     try {
         $t = Get-Content $TARGET_JSON -Raw | ConvertFrom-Json
-        if ($t.KB)    { $Script:LastPickedKB    = $t.KB }
-        if ($t.Build) { $Script:LastPickedBuild = $t.Build }
-        Write-Output "$(Get-TS): Target restored from staged packages: $($Script:LastPickedKB) (build $($Script:LastPickedBuild))"
+        # Corroborate against the packages actually on disk. If the .msu the JSON names is not
+        # there, the JSON is stale (e.g. someone dropped a newer LCU in by hand) - discard it
+        # rather than let it drive the resume / already-built decisions.
+        $staged = @(Get-ChildItem $CU_FOLDER -Filter *.msu -File -ErrorAction SilentlyContinue)
+        if ($t.KB -and @($staged | Where-Object { $_.Name -match $t.KB }).Count -gt 0) {
+            $Script:TargetKB    = $t.KB
+            $Script:TargetBuild = $t.Build
+            Write-Output "$(Get-TS): Target restored from staged packages: $($Script:TargetKB) (build $($Script:TargetBuild))"
+        } else {
+            Write-Warning "$(Get-TS): .target.json names $($t.KB) but no matching .msu is staged - discarding stale identity."
+            Remove-Item $TARGET_JSON -Force -ErrorAction SilentlyContinue
+        }
     } catch {
         Write-Warning "$(Get-TS): Could not read $TARGET_JSON - resume and already-built checks are DISABLED for this run."
     }
 }
-else {
-    Write-Warning "$(Get-TS): Packages are pre-staged but there is no .target.json beside them."
-    Write-Warning "$(Get-TS): The target build is therefore unknown: RESUME and the ALREADY-BUILT guard are DISABLED."
-    Write-Warning "$(Get-TS): Delete $CU_FOLDER and re-run to let the Catalog re-identify the target, or pass -Fresh knowingly."
+
+if (-not $Script:TargetBuild) {
+    Write-Warning "$(Get-TS): Target build is UNKNOWN (offline, no usable .target.json)."
+    Write-Warning "$(Get-TS): RESUME, the ALREADY-BUILT guard and the shipped-build assertion are all DISABLED."
+    Write-Warning "$(Get-TS): This run cannot prove the ISO it produces contains the LCU you think it does."
 }
 
 # Identify the TARGET LCU file (as opposed to its prerequisite checkpoint).
@@ -753,8 +816,8 @@ else {
 # The checkpoint must still be PRESENT in $CU_FOLDER - it is required, just never named.
 $cuFiles = @(Get-ChildItem $CU_FOLDER -Filter *.msu -File -ErrorAction SilentlyContinue)
 $TARGET_LCU_FILE = $null
-if ($Script:LastPickedKB) {
-    $TARGET_LCU_FILE = ($cuFiles | Where-Object Name -match $Script:LastPickedKB | Select-Object -First 1).FullName
+if ($Script:TargetKB) {
+    $TARGET_LCU_FILE = ($cuFiles | Where-Object Name -match $Script:TargetKB | Select-Object -First 1).FullName
 }
 if (-not $TARGET_LCU_FILE -and $cuFiles.Count -gt 0) {
     # Fallback (e.g. pre-staged): the target LCU is by far the largest .msu; the checkpoint is smaller.
@@ -805,40 +868,53 @@ if (-not $SETUP_DU_PATH)   { throw "Setup Dynamic Update missing - cannot refres
 $INSTALL_WIM = Join-Path $MEDIA_NEW 'sources\install.wim'
 $BOOT_WIM    = Join-Path $MEDIA_NEW 'sources\boot.wim'
 
-# ---- Resume detection --------------------------------------------------------
-# A prior failure (e.g. at boot.wim) leaves \newMedia intact with a serviced install.wim.
-# Re-servicing costs hours, so detect that and skip straight to boot.wim.
-#
-# Product-agnostic: instead of a hardcoded RTM baseline (which only ever worked for Server
-# 2025's 26100.1742), compare against the TARGET build we are about to apply, taken from the
-# LCU's Catalog title. If every index is already at/above it, there is nothing to do.
-$SERVICED_FLAG = Join-Path $MEDIA_NEW '.slipstream_installwim_done'
-$TARGET_BUILD  = if ($Script:LastPickedBuild) { [Version]$Script:LastPickedBuild } else { $null }
+# ---- Resume / already-built state --------------------------------------------
+# The resume marker lives in $BasePath, NOT inside \newMedia. It used to live in the media and
+# be deleted just before oscdimg ran (so it wasn't baked into the ISO) - which meant that if
+# oscdimg or verification then failed, the media was fully serviced but the marker was GONE,
+# and the next run re-serviced every edition (~4 h) because an ISO-authoring step had failed.
+$SERVICED_FLAG = Join-Path $BasePath '.slipstream_installwim_done'
+$TARGET_BUILD  = if ($Script:TargetBuild) { [Version]$Script:TargetBuild } else { $null }
+
+# Did the caller name specific editions? The already-built guard must not fire when the
+# requested edition set differs from the one in the manifest - otherwise asking for a Pro-only
+# ISO right after building an Enterprise-only ISO of the same LCU silently produces nothing.
+$explicitSelection = [bool]($Index -or $EditionName -or $ExcludeEditionName -or $ExcludeN -or $AllEditions)
+
+# -Rebuild must invalidate the resume marker too. Bypassing only the guard would leave the
+# resume check free to reuse the previously serviced install.wim - with its OLD edition set -
+# so -TrimMedia / -EditionName would be silently ignored on the very run meant to change them.
+if ($Rebuild) {
+    Write-Output "$(Get-TS): -Rebuild: discarding resume marker; install.wim will be serviced from scratch."
+    Remove-Item $SERVICED_FLAG -Force -ErrorAction SilentlyContinue
+    $Fresh = $true
+}
 
 # ---- Pre-flight: have we already built media for this exact target? -----------
-# The RESUME check only rescues a FAILED run. Nothing used to stop a REDUNDANT one: running
-# the script by hand when the current LCU had already been built happily re-serviced every
-# edition for hours and produced a byte-pointless second ISO. The detector
-# (Watch-Server2025Updates.ps1) has always had this guard via state\last-built.json - but
-# running the slipstream DIRECTLY bypassed the detector entirely.
+# The RESUME check only rescues a FAILED run. Nothing used to stop a REDUNDANT one: running the
+# script by hand when the current LCU had already been built re-serviced every edition for hours
+# and produced a pointless second ISO. Runs BEFORE anything is mounted or copied.
 #
-# Every successful build now drops a manifest sidecar next to the ISO. Check it BEFORE we
-# extract anything. This runs in seconds, and costs nothing when there is no match.
-if ($TARGET_BUILD -and -not $Rebuild) {
+# Keyed on ActualBuild (what is really inside the shipped WIM), not TargetBuild (what we meant
+# to apply). Those two can only diverge if a build shipped wrong - and the shipped-build
+# assertion below now makes that impossible - but keying on outcome means one bad manifest can
+# never poison the guard.
+if ($TARGET_BUILD -and -not $Rebuild -and -not $explicitSelection) {
     foreach ($m in @(Get-ChildItem $BasePath -Filter "$($P.IsoPrefix)_*.iso.json" -File -ErrorAction SilentlyContinue)) {
         $mf = $null
         try { $mf = Get-Content $m.FullName -Raw | ConvertFrom-Json } catch { continue }
-        if (-not $mf) { continue }
-        if ($mf.TargetBuild -ne $Script:LastPickedBuild) { continue }
-        if ([bool]$mf.Trimmed -ne [bool]$TrimMedia)      { continue }
+        if (-not $mf -or -not $mf.ActualBuild) { continue }
+        if ([Version]$mf.ActualBuild -lt $TARGET_BUILD)   { continue }
+        if ([bool]$mf.Trimmed -ne [bool]$TrimMedia)       { continue }
 
         $priorIso = $m.FullName -replace '\.json$', ''
         if (-not (Test-Path $priorIso)) { continue }   # manifest orphaned; ignore it
 
         Write-Output ""
         Write-Output "$(Get-TS): ===== ALREADY BUILT - nothing to do ====="
-        Write-Output "$(Get-TS): Target build : $($Script:LastPickedBuild)  ($($Script:LastPickedKB))"
+        Write-Output "$(Get-TS): Target build : $($Script:TargetBuild)  ($($Script:TargetKB))"
         Write-Output "$(Get-TS): Existing ISO : $priorIso"
+        Write-Output "$(Get-TS): Ships build  : $($mf.ActualBuild)"
         Write-Output "$(Get-TS): Built at     : $($mf.BuiltAt)"
         Write-Output "$(Get-TS): Editions     : $($mf.Editions -join ', ')"
         Write-Output "$(Get-TS): Trimmed      : $($mf.Trimmed)"
@@ -846,16 +922,30 @@ if ($TARGET_BUILD -and -not $Rebuild) {
         Write-Output "$(Get-TS): The current LCU is already slipstreamed into that media. Re-running would"
         Write-Output "$(Get-TS): re-service every edition (hours) and produce an identical ISO."
         Write-Output "$(Get-TS): Pass -Rebuild to build anyway (e.g. to re-cut with a different edition set)."
+        try { Stop-Transcript | Out-Null } catch { Write-Verbose 'transcript already stopped' }
         exit 0
     }
 }
 
+# ---- Resume detection --------------------------------------------------------
+# A prior failure (e.g. at boot.wim) leaves \newMedia intact with a serviced install.wim.
+# Re-servicing costs hours, so detect that and skip straight to boot.wim.
+#
+# The marker records the BUILD it was serviced for. It used to hold only a timestamp, and it
+# short-circuited before the version check - so when a NEW LCU arrived, a marker left by the
+# previous month's run made us skip install.wim servicing entirely and ship an ISO whose
+# install.wim was a month old, while boot.wim and Setup got the new LCU. Exit 0. Green log.
 $installServiced = $false
 if (-not $Fresh) {
-    if (Test-Path $SERVICED_FLAG) {
-        $installServiced = $true                       # fast, definitive marker
+    $flagBuild = if (Test-Path $SERVICED_FLAG) { (Get-Content $SERVICED_FLAG -Raw).Trim() } else { $null }
+    if ($flagBuild -and $TARGET_BUILD -and ($flagBuild -eq $Script:TargetBuild) -and (Test-Path $INSTALL_WIM)) {
+        $installServiced = $true                       # marker matches THIS target
+    } elseif ($flagBuild -and $TARGET_BUILD -and ($flagBuild -ne $Script:TargetBuild)) {
+        Write-Warning "$(Get-TS): Resume marker is for build $flagBuild but the target is $($Script:TargetBuild) - ignoring it and rebuilding."
+        Remove-Item $SERVICED_FLAG -Force -ErrorAction SilentlyContinue
     } elseif ((Test-Path $INSTALL_WIM) -and $TARGET_BUILD) {
-        # Query EACH index for its .Version (the no -Index form omits .Version entirely).
+        # No usable marker: fall back to interrogating the media. Query EACH index for its
+        # .Version (the no -Index form omits .Version entirely - that bug cost 4.5 h once).
         try {
             $allUp = $true
             foreach ($im in (Get-WindowsImage -ImagePath $INSTALL_WIM -ErrorAction Stop)) {
@@ -868,7 +958,7 @@ if (-not $Fresh) {
 }
 
 if ($installServiced) {
-    Write-Output "$(Get-TS): RESUME: existing serviced install.wim found in \newMedia (all indexes > RTM). Skipping ISO extraction and install.wim servicing. Use -Fresh to force a full rebuild."
+    Write-Output "$(Get-TS): RESUME: \newMedia already holds an install.wim serviced to $($Script:TargetBuild). Skipping ISO extraction and install.wim servicing. Use -Fresh to force a full rebuild."
 } else {
     # ===========================================================================
     #  3.  Extract the RTM ISO into \newMedia
@@ -1035,7 +1125,15 @@ foreach ($IMAGE in $selected) {
     Write-Output "$(Get-TS): Index map saved to $LOG_DIR\EditionMap_$stamp.json"
     # Drop a resume marker so a later re-run (e.g. after a boot.wim/ISO failure) skips
     # the multi-hour install.wim phase instead of rebuilding it.
-    Set-Content -Path $SERVICED_FLAG -Value ("serviced {0}" -f (Get-TS)) -ErrorAction SilentlyContinue
+    # Record the BUILD, not a timestamp - the marker is only valid for the target it was made
+    # for. No -ErrorAction SilentlyContinue: if we cannot write the marker, resume is silently
+    # unavailable and the next failure costs another full re-service. Say so.
+    try {
+        Set-Content -Path $SERVICED_FLAG -Value $Script:TargetBuild -ErrorAction Stop
+    } catch {
+        Write-Warning "$(Get-TS): Could not write resume marker ($SERVICED_FLAG): $($_.Exception.Message)"
+        Write-Warning "$(Get-TS): A later failure will re-service install.wim from scratch."
+    }
     Write-Output "$(Get-TS): install.wim fully serviced."
 }   # end else (install.wim servicing / resume skip)
 
@@ -1111,8 +1209,9 @@ Write-Output "$(Get-TS): Media files refreshed."
 # ===========================================================================
 #  7.  Rebuild the bootable ISO with oscdimg
 # ===========================================================================
-# Remove the internal resume marker so it doesn't get baked into the ISO.
-Remove-Item $SERVICED_FLAG -Force -ErrorAction SilentlyContinue
+# NOTE: the resume marker now lives in $BasePath, not in \newMedia, so there is nothing to
+# delete here - it cannot be baked into the ISO, and it survives an oscdimg/verification
+# failure so that a retry does not re-service install.wim for four hours.
 
 $etfs = Join-Path $MEDIA_NEW 'boot\etfsboot.com'
 $efi  = Join-Path $MEDIA_NEW 'efi\microsoft\boot\efisys.bin'
@@ -1141,26 +1240,78 @@ New-Item -ItemType Directory -Path $verifyMount -Force | Out-Null
 $vDrive = Mount-IsoGetDrive -Path $OUTPUT_ISO
 $Script:MountedISOs += $OUTPUT_ISO
 $vWim = "$vDrive`:\sources\install.wim"
-Mount-WindowsImage -ImagePath $vWim -Index 1 -Path $verifyMount -ReadOnly | Out-Null
-$Script:MountedImagePaths += $verifyMount
 
-$ver = (Get-WindowsImage -ImagePath $vWim -Index 1).Version
+# Version EVERY shipped index, not just index 1. On a NON-trimmed subset build, index 1 is
+# very often an edition we deliberately did not patch - so reading index 1 alone reported the
+# RTM build as "the patched build", which looked like a failure on a good build and, worse,
+# would have made any assertion on index 1 fire falsely.
+# Per-index -Index is mandatory: Get-WindowsImage without it omits .Version entirely.
+$shipped = @(
+    foreach ($im in (Get-WindowsImage -ImagePath $vWim)) {
+        Get-WindowsImage -ImagePath $vWim -Index $im.ImageIndex
+    }
+) | Sort-Object ImageIndex
+
+Write-Output "$(Get-TS): Shipped install.wim contents:"
+$shipped | Select-Object ImageIndex, ImageName, Version | Format-Table -AutoSize | Out-String | Write-Output
+
+$shippedVers = @($shipped | Where-Object Version | ForEach-Object { [Version]$_.Version })
+$maxVer      = if ($shippedVers) { ($shippedVers | Sort-Object -Descending)[0] } else { $null }
+$minVer      = if ($shippedVers) { ($shippedVers | Sort-Object)[0] }            else { $null }
+
+# ---- THE ASSERTION -----------------------------------------------------------
+# Everything upstream of here can fail silently: a stale CU, a resume onto month-old media, a
+# DISM add that no-ops. This is the one place that can catch all of them, and it used to just
+# PRINT the version and carry on to exit 0. Now it is a hard gate.
+#
+# We assert on the MAXIMUM shipped version: at least one edition must actually carry the target
+# LCU. (We cannot assert on all of them - on a non-trimmed subset build the unselected editions
+# are RTM on purpose.)
+#
+# The throw happens BEFORE the manifest is written. That is deliberate: no manifest means the
+# ALREADY-BUILT guard cannot be poisoned by a bad build, and the detector will not stamp state,
+# so the next run retries instead of declaring victory.
+if ($TARGET_BUILD) {
+    if (-not $maxVer) {
+        throw "VERIFY FAILED: could not read a build version from any index of the shipped install.wim. ISO left at $OUTPUT_ISO; no manifest written."
+    }
+    if ($maxVer -lt $TARGET_BUILD) {
+        throw ("VERIFY FAILED: shipped install.wim tops out at {0} but the target LCU ({1}) is {2}. " -f $maxVer, $Script:TargetKB, $TARGET_BUILD) +
+              "The media does NOT contain the update it claims to. ISO left at $OUTPUT_ISO for inspection; no manifest written. " +
+              "Most likely a stale resume: re-run with -Fresh."
+    }
+    Write-Output "$(Get-TS): VERIFY OK: shipped build $maxVer >= target $TARGET_BUILD."
+} else {
+    Write-Warning "$(Get-TS): Target build unknown (offline build) - CANNOT verify the shipped media contains the intended LCU."
+}
+
+# Package list from the edition that actually carries the LCU (not blindly index 1).
+$pkgIx = ($shipped | Where-Object { $_.Version -and $maxVer -and ([Version]$_.Version -eq $maxVer) } |
+          Select-Object -First 1).ImageIndex
+if (-not $pkgIx) { $pkgIx = 1 }
+Mount-WindowsImage -ImagePath $vWim -Index $pkgIx -Path $verifyMount -ReadOnly | Out-Null
+$Script:MountedImagePaths += $verifyMount
 $lcuPkgs = Get-WindowsPackage -Path $verifyMount |
            Where-Object { $_.PackageName -match 'Cumulative|LanguageFeatures|NetFX|Checkpoint' -or $_.ReleaseType -match 'Update' } |
            Sort-Object PackageName
-Write-Output "$(Get-TS): Patched install.wim (index 1) build version: $ver"
-Write-Output "$(Get-TS): Update packages present in image:"
+Write-Output "$(Get-TS): Update packages present in index $pkgIx :"
 $lcuPkgs | Select-Object PackageName, PackageState | Format-Table -AutoSize | Out-String | Write-Output
 
+Dismount-WindowsImage -Path $verifyMount -Discard | Out-Null
+$Script:MountedImagePaths = $Script:MountedImagePaths | Where-Object { $_ -ne $verifyMount }
+Dismount-DiskImage -ImagePath $OUTPUT_ISO | Out-Null
+$Script:MountedISOs = $Script:MountedISOs | Where-Object { $_ -ne $OUTPUT_ISO }
+
 # ---- Manifest sidecar --------------------------------------------------------
-# Written from the SHIPPED media (not from in-memory selection state), so it is true on both
-# the full-build and the resume path. The pre-flight ALREADY-BUILT guard reads these.
-$shipped = @(Get-WindowsImage -ImagePath $vWim | Sort-Object ImageIndex)
+# Written ONLY after the assertion passed, and built from the SHIPPED media rather than from
+# in-memory selection state, so it is equally true on the full-build and the resume paths.
+# ActualBuild is what the ALREADY-BUILT guard keys on - outcome, not intent.
 [pscustomobject]@{
     Product     = $Product
-    TargetBuild = $Script:LastPickedBuild
-    LcuKB       = $Script:LastPickedKB
-    ActualBuild = "$ver"
+    TargetBuild = $Script:TargetBuild
+    LcuKB       = $Script:TargetKB
+    ActualBuild = if ($maxVer) { "$maxVer" } else { $null }
+    MinBuild    = if ($minVer) { "$minVer" } else { $null }
     Trimmed     = [bool]$TrimMedia
     Editions    = @($shipped | ForEach-Object { $_.ImageName })
     Iso         = $OUTPUT_ISO
@@ -1168,11 +1319,6 @@ $shipped = @(Get-WindowsImage -ImagePath $vWim | Sort-Object ImageIndex)
     ScriptVer   = $ScriptVersion
 } | ConvertTo-Json | Set-Content -Path "$OUTPUT_ISO.json" -Encoding UTF8
 Write-Output "$(Get-TS): Manifest written: $OUTPUT_ISO.json  (re-runs for this build will now no-op)"
-
-Dismount-WindowsImage -Path $verifyMount -Discard | Out-Null
-$Script:MountedImagePaths = $Script:MountedImagePaths | Where-Object { $_ -ne $verifyMount }
-Dismount-DiskImage -ImagePath $OUTPUT_ISO | Out-Null
-$Script:MountedISOs = $Script:MountedISOs | Where-Object { $_ -ne $OUTPUT_ISO }
 
 # ===========================================================================
 #  9.  Cleanup
@@ -1186,4 +1332,9 @@ if (-not $KeepNewMedia) {
 }
 
 Write-Output "$(Get-TS): ===== DONE. Patched ISO: $OUTPUT_ISO ====="
-Stop-Transcript | Out-Null
+# Guarded, like every other Stop-Transcript in this file. A bare one here is under
+# $ErrorActionPreference='Stop' with a trap that exits 1 - so if it threw, a perfectly good
+# 4-hour build would report failure, the detector would refuse to stamp state, and tomorrow it
+# would build the whole thing again.
+try { Stop-Transcript | Out-Null } catch { Write-Verbose 'transcript already stopped' }
+exit 0

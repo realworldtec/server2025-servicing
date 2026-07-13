@@ -76,7 +76,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.1'
+$ScriptVersion = '1.1.0'
 function Get-TS { '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 function Info  ($m) { Write-Host  "$(Get-TS): $m" }
 function Warn  ($m) { Write-Warning "$(Get-TS): $m" }
@@ -199,6 +199,7 @@ function Enable-WinREImage {
 # ==============================================================================
 #  MAIN
 # ==============================================================================
+$exitCode = 0
 try {
     # 1. Guard
     $blocked = @(Test-Blocked)
@@ -233,6 +234,11 @@ try {
     $rhOk = Invoke-Dism -What 'RestoreHealth' -Arguments $rhArgs
     if (-not $rhOk) {
         Warn 'RestoreHealth did not succeed. The fresh detail is now in C:\Windows\Logs\CBS\CBS.log (copied below) - the "Cannot repair member file" lines name the exact components/source still needed.'
+        # A failed repair MUST NOT report success. This script previously had no `exit` at all,
+        # so every path - failed RestoreHealth, pending-reboot abort, no source found, even the
+        # FATAL catch - returned 0. Any wrapper gating on $LASTEXITCODE recorded "repaired" for
+        # a store that was never touched.
+        $exitCode = 1
     }
 
     # 3c. sfc
@@ -260,11 +266,13 @@ try {
         else { Warn 'EnableWinRE requested but no install.wim available to source Winre.wim; skipping.' }
     }
 
-    Info '===== Repair run complete ====='
+    if ($exitCode -eq 0) { Info '===== Repair run complete (store repaired) =====' }
+    else                 { Warn '===== Repair run complete BUT THE STORE WAS NOT REPAIRED (exit 1) =====' }
 }
 catch {
     Warn "FATAL: $($_.Exception.Message)"
     Warn $_.ScriptStackTrace
+    $exitCode = 1
 }
 finally {
     # 5. Preserve the logs that actually contain the detail
@@ -276,5 +284,9 @@ finally {
         }
     }
     Info "Transcript: $logFile"
-    Stop-Transcript | Out-Null
+    # Guarded: under $ErrorActionPreference='Stop', a bare Stop-Transcript that throws from
+    # INSIDE finally replaces the original FATAL error with "host is not currently transcribing".
+    try { Stop-Transcript | Out-Null } catch { Write-Verbose 'transcript already stopped' }
 }
+
+exit $exitCode
