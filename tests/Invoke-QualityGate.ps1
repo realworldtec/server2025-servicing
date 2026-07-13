@@ -53,7 +53,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.3.0
+    Version : 1.3.1
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -140,6 +140,13 @@ Write-Host ""
 Write-Host "[3/4] Project rules" -ForegroundColor Cyan
 
 foreach ($f in $files) {
+    # Don't lint the gate with its own rules. Rule D exists to catch product literals leaking
+    # into a script that CONSUMES the product config; this file VALIDATES that config, so the
+    # literals it asserts on (e.g. the load-bearing 'Server2025_Patched' prefix) are the whole
+    # point. Without this, stage 3 flags stage 4 - which is noise, and noise is how a gate
+    # becomes something you skim past.
+    if ($f.FullName -eq $PSCommandPath) { continue }
+
     $ast = $null
     try {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
@@ -307,21 +314,21 @@ if (-not (Test-Path $cfg)) {
     Write-Host "  FAIL  config\Products.psd1 not found - the slipstream cannot run without it." -ForegroundColor Red
     $failures++
 } else {
-    $products = $null
+    $cfgProducts = $null
     try {
-        $products = Import-PowerShellDataFile -Path $cfg -ErrorAction Stop
+        $cfgProducts = Import-PowerShellDataFile -Path $cfg -ErrorAction Stop
     } catch {
         Write-Host ("  FAIL  config\Products.psd1 is not valid PowerShell data: {0}" -f $_.Exception.Message) -ForegroundColor Red
         Write-Host "        It must be ONE hashtable of literals - no commands, variables or expressions." -ForegroundColor Red
         $failures++
     }
-    if ($products) {
+    if ($cfgProducts) {
         $required = @('Label','IsoPrefix','BasePath','SourceISO','LcuQuery','LcuInclude',
                       'SafeOsQuery','SafeOsInclude','SetupQuery','SetupInclude',
                       'DotNetQuery','DotNetInclude')
         $bad = 0
-        foreach ($name in ($products.Keys | Sort-Object)) {
-            $prof = $products[$name]
+        foreach ($name in ($cfgProducts.Keys | Sort-Object)) {
+            $prof = $cfgProducts[$name]
             $errs = @()
             if ($prof -isnot [hashtable]) { $errs += 'not a hashtable' }
             else {
@@ -348,7 +355,7 @@ if (-not (Test-Path $cfg)) {
 
         # The detector globs 'Server2025_Patched_*.iso' to find and archive the monthly build.
         # Rename that prefix and the scheduled task keeps "succeeding" while archiving nothing.
-        if ($products.ContainsKey('Server2025') -and $products['Server2025']['IsoPrefix'] -ne 'Server2025_Patched') {
+        if ($cfgProducts.ContainsKey('Server2025') -and $cfgProducts['Server2025']['IsoPrefix'] -ne 'Server2025_Patched') {
             $failures++
             Write-Host "  FAIL  Server2025.IsoPrefix must be 'Server2025_Patched'." -ForegroundColor Red
             Write-Host "        Watch-Server2025Updates.ps1 archives the build by globbing 'Server2025_Patched_*.iso'." -ForegroundColor Red
