@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 3.0.0   (correctness pass: stale-CU purge, build-stamped resume, hard verify)
+    Version    : 3.2.0   (product profiles externalised to config\Products.psd1)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -57,9 +57,18 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    # Which media family to service. Drives the Catalog search strings (see $PRODUCTS below).
-    [ValidateSet('Server2025','Win11-25H2','Win11-24H2')]
+    # Which media family to service. The named profile is looked up in the config data file
+    # (-ConfigPath). NO ValidateSet: the valid products are whatever the config defines, and a
+    # hardcoded list here would go stale the moment someone adds a product to the .psd1.
+    # Validated at runtime instead, which also lets us print the available names on a typo.
     [string]$Product = 'Server2025',
+
+    # Product profiles. A PowerShell DATA file (restricted language - literals only, no code).
+    # This is the ONLY file an operator should need to edit. See docs/EDITIONS.md.
+    [string]$ConfigPath,
+
+    # Print the products defined in the config and exit.
+    [switch]$ListProducts,
 
     # Source RTM media (data volume; the ISO is mounted read-only during the build).
     # Defaults to the per-product ISO in $PRODUCTS unless overridden here.
@@ -149,66 +158,79 @@ param(
 #       6 Pro N       7 Pro Education 8 Pro Education N
 #       9 Pro for Workstations        10 Pro N for Workstations
 # ===========================================================================
-$PRODUCTS = @{
-    'Server2025' = @{
-        Label         = 'SERVER2025_PATCHED'
-        # IsoPrefix MUST stay 'Server2025_Patched': Watch-Server2025Updates.ps1 globs
-        # 'Server2025_Patched_*.iso' to find and archive the build. Changing it breaks the task.
-        IsoPrefix     = 'Server2025_Patched'
-        BasePath      = 'D:\Server2025Patching'
-        SourceISO     = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO'
-        DefaultEditions = $null      # all 4 - the scheduled task relies on this
-        PreferRegex   = 'server operating system'
-        LcuQuery      = 'Cumulative Update Microsoft server operating system version 24H2 x64'
-        LcuInclude    = 'Cumulative Update for Microsoft server operating system version 24H2'
-        SafeOsQuery   = 'Safe OS Dynamic Update Microsoft server operating system version 24H2 x64'
-        SafeOsInclude = 'Safe OS Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? versions? .*24H2)'
-        SetupQuery    = 'Setup Dynamic Update Microsoft server operating system version 24H2 x64'
-        SetupInclude  = 'Setup Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? versions? .*24H2)'
-        DotNetQuery   = 'Cumulative Update .NET Framework Microsoft server operating system version 24H2 x64'
-        DotNetInclude = 'Cumulative Update for \.NET Framework .*Microsoft server operating system version 24H2'
+# ---------------------------------------------------------------------------
+#  Load the product profiles from the DATA file.
+#
+#  The profiles used to live in this script, which meant that changing which editions get
+#  patched required hand-editing executable code - a typo in a config value could take out the
+#  build logic, and a merge conflict in the table sat in the same file as the servicing steps.
+#
+#  Import-PowerShellDataFile parses in RESTRICTED LANGUAGE mode: literals, hashtables, arrays,
+#  $true/$false/$null. No commands, no calls, no variables. A config file cannot execute
+#  anything, which is the point.
+# ---------------------------------------------------------------------------
+if (-not $ConfigPath) { $ConfigPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'config\Products.psd1' }
+if (-not (Test-Path $ConfigPath)) {
+    throw "Product config not found: $ConfigPath`nThis file defines every product profile. Restore it from the repo, or pass -ConfigPath."
+}
+try {
+    $PRODUCTS = Import-PowerShellDataFile -Path $ConfigPath -ErrorAction Stop
+} catch {
+    throw "Product config is not valid PowerShell data: $ConfigPath`n$($_.Exception.Message)`nIt must contain ONE hashtable of literals. No commands, no variables, no expressions."
+}
+if (-not $PRODUCTS -or $PRODUCTS.Keys.Count -eq 0) { throw "Product config defines no products: $ConfigPath" }
+
+# Validate EVERY profile up front, not just the one being built. A broken profile is a
+# five-second failure here or a four-hour failure later; there is no third option.
+$REQUIRED_FIELDS = @('Label','IsoPrefix','BasePath','SourceISO','LcuQuery','LcuInclude',
+                     'SafeOsQuery','SafeOsInclude','SetupQuery','SetupInclude',
+                     'DotNetQuery','DotNetInclude')
+$cfgErrors = @()
+foreach ($name in $PRODUCTS.Keys) {
+    $prof = $PRODUCTS[$name]
+    if ($prof -isnot [hashtable]) { $cfgErrors += "[$name] is not a hashtable."; continue }
+    foreach ($f in $REQUIRED_FIELDS) {
+        if (-not $prof.ContainsKey($f)) { $cfgErrors += "[$name] is missing required field '$f'." }
+        elseif ([string]::IsNullOrWhiteSpace([string]$prof[$f])) { $cfgErrors += "[$name] field '$f' is empty." }
     }
-    'Win11-25H2' = @{
-        Label         = 'WIN11_25H2_PATCHED'
-        IsoPrefix     = 'Win11_25H2_Patched'
-        BasePath      = 'D:\Win11_25H2_Patching'
-        SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_25h2_x64_dvd_41c521e7.iso'
-        DefaultEditions = @(
-            'Windows 11 Enterprise'                 # index 3
-            'Windows 11 Pro'                        # index 5
-            'Windows 11 Pro for Workstations'       # index 9
-        )
-        PreferRegex   = $null                       # no server/client disambiguation needed
-        LcuQuery      = 'Cumulative Update for Windows 11 version 25H2 x64'
-        LcuInclude    = 'Cumulative Update for Windows 11,? version 25H2'
-        SafeOsQuery   = 'Safe OS Dynamic Update for Windows 11 version 25H2 x64'
-        SafeOsInclude = 'Safe OS Dynamic Update for Windows 11,? versions? .*25H2'
-        SetupQuery    = 'Setup Dynamic Update for Windows 11 version 25H2 x64'
-        SetupInclude  = 'Setup Dynamic Update for Windows 11,? versions? .*25H2'
-        DotNetQuery   = 'Cumulative Update .NET Framework Windows 11 version 25H2 x64'
-        DotNetInclude = 'Cumulative Update for \.NET Framework .*Windows 11,? version 25H2'
-    }
-    'Win11-24H2' = @{
-        Label         = 'WIN11_24H2_PATCHED'
-        IsoPrefix     = 'Win11_24H2_Patched'
-        BasePath      = 'D:\Win11_24H2_Patching'
-        SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64_dvd_59a1851e.iso'
-        DefaultEditions = @(
-            'Windows 11 Enterprise'                 # index 3
-            'Windows 11 Pro'                        # index 5
-            'Windows 11 Pro for Workstations'       # index 9
-        )
-        PreferRegex   = $null
-        LcuQuery      = 'Cumulative Update for Windows 11 version 24H2 x64'
-        LcuInclude    = 'Cumulative Update for Windows 11,? version 24H2'
-        SafeOsQuery   = 'Safe OS Dynamic Update for Windows 11 version 24H2 x64'
-        SafeOsInclude = 'Safe OS Dynamic Update for Windows 11,? versions? .*24H2'
-        SetupQuery    = 'Setup Dynamic Update for Windows 11 version 24H2 x64'
-        SetupInclude  = 'Setup Dynamic Update for Windows 11,? versions? .*24H2'
-        DotNetQuery   = 'Cumulative Update .NET Framework Windows 11 version 24H2 x64'
-        DotNetInclude = 'Cumulative Update for \.NET Framework .*Windows 11,? version 24H2'
+    # DefaultEditions and PreferRegex are OPTIONAL and $null is MEANINGFUL ($null = all
+    # editions), so they are deliberately not in $REQUIRED_FIELDS. But if DefaultEditions IS
+    # present, it must be a list of names - and it must not contain wildcards, which is the
+    # single most likely edit mistake (names are matched with -eq, so '*Pro*' matches nothing).
+    if ($prof.ContainsKey('DefaultEditions') -and $null -ne $prof['DefaultEditions']) {
+        foreach ($e in @($prof['DefaultEditions'])) {
+            if ([string]::IsNullOrWhiteSpace([string]$e)) { $cfgErrors += "[$name] DefaultEditions contains an empty entry." }
+            elseif ("$e" -match '[\*\?]') {
+                $cfgErrors += "[$name] DefaultEditions entry '$e' contains a wildcard. Names are matched EXACTLY (-eq), so this would match NOTHING. Use the full edition name from -ListEditions, or use -EditionName on the command line (which does accept wildcards)."
+            }
+        }
     }
 }
+if ($cfgErrors.Count -gt 0) {
+    throw ("Product config is invalid ($ConfigPath):`n  " + ($cfgErrors -join "`n  "))
+}
+
+if ($ListProducts) {
+    Write-Host ""
+    Write-Host "Products defined in $ConfigPath :"
+    foreach ($name in ($PRODUCTS.Keys | Sort-Object)) {
+        $prof = $PRODUCTS[$name]
+        $def  = if ($null -eq $prof['DefaultEditions']) { 'ALL editions' } else { ($prof['DefaultEditions'] -join ', ') }
+        Write-Host ""
+        Write-Host ("  {0}" -f $name)
+        Write-Host ("    Source ISO : {0}" -f $prof['SourceISO'])
+        Write-Host ("    Base path  : {0}" -f $prof['BasePath'])
+        Write-Host ("    ISO prefix : {0}_<stamp>.iso" -f $prof['IsoPrefix'])
+        Write-Host ("    Defaults   : {0}" -f $def)
+    }
+    Write-Host ""
+    exit 0
+}
+
+if (-not $PRODUCTS.ContainsKey($Product)) {
+    throw ("Unknown -Product '$Product'. Defined in {0}: {1}" -f $ConfigPath, (($PRODUCTS.Keys | Sort-Object) -join ', '))
+}
+
 $P = $PRODUCTS[$Product]
 if (-not $SourceISO) { $SourceISO = $P.SourceISO }
 if (-not $BasePath)  { $BasePath  = $P.BasePath }
@@ -227,7 +249,7 @@ $SELECTION = @{
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '3.0.0'
+$ScriptVersion          = '3.2.0'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -263,7 +285,15 @@ function Resolve-EditionSelection {
         $sel = $Images
     }
     elseif ($Spec.Index -or $Spec.EditionName) {
-        if ($Spec.Index) { $sel += @($Images | Where-Object { $Spec.Index -contains $_.ImageIndex }) }
+        if ($Spec.Index) {
+            foreach ($i in $Spec.Index) {
+                $hit = @($Images | Where-Object { $_.ImageIndex -eq $i })
+                # -Index used to be silent about misses: '-Index 3,99' patched one edition and
+                # said nothing. -EditionName warned; -Index did not.
+                if ($hit.Count -eq 0) { Write-Warning "$(Get-TS): -Index $i does not exist in this media (it has $($Images.Count) edition(s))." }
+                $sel += $hit
+            }
+        }
         if ($Spec.EditionName) {
             foreach ($pat in $Spec.EditionName) {
                 $hit = @($Images | Where-Object { $_.ImageName -like $pat })
@@ -876,10 +906,26 @@ $BOOT_WIM    = Join-Path $MEDIA_NEW 'sources\boot.wim'
 $SERVICED_FLAG = Join-Path $BasePath '.slipstream_installwim_done'
 $TARGET_BUILD  = if ($Script:TargetBuild) { [Version]$Script:TargetBuild } else { $null }
 
-# Did the caller name specific editions? The already-built guard must not fire when the
-# requested edition set differs from the one in the manifest - otherwise asking for a Pro-only
-# ISO right after building an Enterprise-only ISO of the same LCU silently produces nothing.
-$explicitSelection = [bool]($Index -or $EditionName -or $ExcludeEditionName -or $ExcludeN -or $AllEditions)
+# ---- Selection key -----------------------------------------------------------
+# A deterministic fingerprint of WHAT WAS ASKED FOR. The already-built guard compares it, so a
+# build is only considered "already done" when the same LCU was built with the same edition
+# request. Without this:
+#   * asking for a Pro-only ISO right after building an Enterprise-only ISO of the same LCU
+#     would silently produce nothing ("ALREADY BUILT"), and
+#   * hand-editing $PRODUCTS.DefaultEditions would have NO effect - the guard would match the
+#     manifest from the old default set and no-op. That is the change an operator is most
+#     likely to make, and it would have appeared to do nothing.
+# The profile's DefaultEditions only enters the key when the default path is actually taken;
+# editing it therefore does not needlessly invalidate an -AllEditions or -Index build.
+$usingDefaults = -not ($AllEditions -or $Index -or $EditionName)
+$SELECTION_KEY = @(
+    "all=$([bool]$AllEditions)"
+    "idx=$((@($Index)              | Sort-Object) -join ',')"
+    "name=$((@($EditionName)        | Sort-Object) -join '|')"
+    "xname=$((@($ExcludeEditionName)| Sort-Object) -join '|')"
+    "xn=$([bool]$ExcludeN)"
+    "def=$(if ($usingDefaults) { (@($P.DefaultEditions) | Sort-Object) -join '|' } else { '(n/a)' })"
+) -join ';'
 
 # -Rebuild must invalidate the resume marker too. Bypassing only the guard would leave the
 # resume check free to reuse the previously serviced install.wim - with its OLD edition set -
@@ -899,13 +945,16 @@ if ($Rebuild) {
 # to apply). Those two can only diverge if a build shipped wrong - and the shipped-build
 # assertion below now makes that impossible - but keying on outcome means one bad manifest can
 # never poison the guard.
-if ($TARGET_BUILD -and -not $Rebuild -and -not $explicitSelection) {
+if ($TARGET_BUILD -and -not $Rebuild) {
     foreach ($m in @(Get-ChildItem $BasePath -Filter "$($P.IsoPrefix)_*.iso.json" -File -ErrorAction SilentlyContinue)) {
         $mf = $null
         try { $mf = Get-Content $m.FullName -Raw | ConvertFrom-Json } catch { continue }
         if (-not $mf -or -not $mf.ActualBuild) { continue }
         if ([Version]$mf.ActualBuild -lt $TARGET_BUILD)   { continue }
         if ([bool]$mf.Trimmed -ne [bool]$TrimMedia)       { continue }
+        # Manifests from before SelectionKey existed have no key: treat them as non-matching
+        # rather than assume they used today's selection.
+        if ($mf.SelectionKey -ne $SELECTION_KEY)          { continue }
 
         $priorIso = $m.FullName -replace '\.json$', ''
         if (-not (Test-Path $priorIso)) { continue }   # manifest orphaned; ignore it
@@ -918,6 +967,7 @@ if ($TARGET_BUILD -and -not $Rebuild -and -not $explicitSelection) {
         Write-Output "$(Get-TS): Built at     : $($mf.BuiltAt)"
         Write-Output "$(Get-TS): Editions     : $($mf.Editions -join ', ')"
         Write-Output "$(Get-TS): Trimmed      : $($mf.Trimmed)"
+        Write-Output "$(Get-TS): Selection    : $($mf.SelectionKey)"
         Write-Output ""
         Write-Output "$(Get-TS): The current LCU is already slipstreamed into that media. Re-running would"
         Write-Output "$(Get-TS): re-service every edition (hours) and produce an identical ISO."
@@ -1313,6 +1363,8 @@ $Script:MountedISOs = $Script:MountedISOs | Where-Object { $_ -ne $OUTPUT_ISO }
     ActualBuild = if ($maxVer) { "$maxVer" } else { $null }
     MinBuild    = if ($minVer) { "$minVer" } else { $null }
     Trimmed     = [bool]$TrimMedia
+    SelectionKey    = $SELECTION_KEY
+    RequestedDefaults = @($P.DefaultEditions)
     Editions    = @($shipped | ForEach-Object { $_.ImageName })
     Iso         = $OUTPUT_ISO
     BuiltAt     = (Get-TS)

@@ -8,6 +8,67 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [3.2.0] - 2026-07-13 — product profiles moved out of the script
+
+### Changed — BREAKING (deployment)
+- **`$PRODUCTS` is now `config/Products.psd1`.** The profiles used to live inside
+  `Slipstream-WindowsMedia.ps1`, which meant that changing which editions get patched — the one
+  thing an operator routinely does — required **hand-editing executable code**. A typo in a config
+  value could take out the build logic, a merge conflict in the table landed in the same file as
+  the servicing steps, and the config was invisible to anyone not reading 1,300 lines of
+  PowerShell.
+
+  The file is loaded with `Import-PowerShellDataFile`, which parses in **restricted-language**
+  mode: literals, hashtables, arrays, `$true`/`$false`/`$null`. **No commands, no calls, no
+  variables.** A config file cannot execute anything — which is the point.
+
+  **Deployment:** `config/Products.psd1` must be present on the build host. The slipstream throws
+  a clear error naming the expected path if it is not. `-ConfigPath` overrides the location.
+
+### Added
+- **`-ListProducts`** — prints every product the config defines (source ISO, base path, ISO
+  prefix, default editions) and exits.
+- **Startup validation of every profile, not just the one being built.** Missing/empty required
+  fields, non-hashtable profiles, and **wildcards in `DefaultEditions`** are rejected in seconds,
+  before anything mounts. The wildcard check matters: names are matched with `-eq`, so `'*Pro*'`
+  in the profile silently matched **nothing** — now it is a hard, explanatory error.
+- **Quality gate stage 4 (`Invoke-QualityGate.ps1` → v1.3.0): product-config validation.** Same
+  checks, plus an assertion that **`Server2025.IsoPrefix` is still `Server2025_Patched`** — the
+  detector globs that prefix to archive the monthly build, so renaming it would leave the
+  scheduled task "succeeding" while archiving nothing.
+
+### Removed
+- **`ValidateSet` on `-Product`.** A hardcoded list in the script would go stale the moment
+  someone added a product to the config. `-Product` is now validated at runtime against whatever
+  the config defines, and an unknown name prints the valid ones. Adding a new product (e.g. Win11
+  26H1) is now a **config-only change** — copy a profile block, edit the strings, no script edit.
+
+## [3.1.0] - 2026-07-13
+
+### Added
+- **`docs/EDITIONS.md`** — the missing documentation for `$PRODUCTS.DefaultEditions` and the
+  edition resolver. This is the table an operator actually hand-edits, and it had sharp,
+  undocumented edges: `$null` means **all** editions (Server 2025 depends on this — its
+  `install.wim` is also the `RestoreHealth` repair source, so quietly subsetting it breaks
+  repairs, not builds); `DefaultEditions` matches names **exactly** while `-EditionName` matches
+  with **wildcards**, so `'*Pro*'` in the profile matches *nothing*; and `-Index`/`-EditionName`
+  **replace** the defaults rather than extending them. Covers the resolution order, `-ExcludeN`'s
+  standalone-token rule, selection-vs-trim, WinRE sourcing from the first selected index, the
+  verified media layouts, and a failure-mode table.
+- **`SelectionKey` in the build manifest.** A fingerprint of what was *requested* (switches, plus
+  `DefaultEditions` when the default path was taken).
+
+### Fixed
+- **Hand-editing `DefaultEditions` would have been silently ignored.** The ALREADY-BUILT guard
+  keyed only on build + trim, so after editing the defaults the next run would match the manifest
+  from the **old** edition set and report "ALREADY BUILT — nothing to do". The most likely edit an
+  operator makes, doing nothing, confidently. The guard now compares `SelectionKey`, so changing
+  the defaults (or asking for a different set explicitly) correctly forces a build. This also
+  replaces v3.0.0's cruder fix, which simply disabled the guard whenever any selection switch was
+  passed — re-running the *same* explicit command now correctly no-ops instead of rebuilding.
+- **`-Index` was silent about indexes that don't exist.** `-Index 3,99` patched one edition and
+  said nothing; `-EditionName` warned but `-Index` did not. It now warns.
+
 ## [3.0.0] - 2026-07-13 — full logic review
 
 Every script was read line-by-line for **logic** defects (the quality gate only catches syntax

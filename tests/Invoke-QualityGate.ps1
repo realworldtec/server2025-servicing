@@ -5,7 +5,7 @@
     cannot have verified its own syntax.
 
 .DESCRIPTION
-    Three layers, fastest first:
+    Four layers, fastest first:
 
       1. AST PARSE  - the real PowerShell parser. Catches every syntax error: a comment that
                       swallowed a closing brace, a try/catch piped into Out-File, an unclosed
@@ -13,6 +13,12 @@
       2. PSSCRIPTANALYZER - unapproved verbs, uninitialised vars, common bad practice.
       3. PROJECT RULES - static checks for the specific footguns that have actually bitten
                       this codebase (see below). Cheap insurance against repeat offences.
+      4. PRODUCT CONFIG - validates config\Products.psd1: it parses as restricted-language
+                      data, every profile has the required fields, no DefaultEditions entry
+                      contains a wildcard (they are matched with -eq, so a wildcard matches
+                      NOTHING - silently), and Server2025.IsoPrefix is unchanged (the detector
+                      globs it to archive the monthly build). This is the file operators edit,
+                      so a bad edit must fail HERE, in seconds - not four hours into a build.
 
     Project rules currently enforced:
       * Stop-Transcript appearing BOTH inside a finally block and outside it. A redundant
@@ -47,7 +53,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.2.0
+    Version : 1.3.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -72,7 +78,7 @@ Write-Host ("=" * 70)
 # 1. AST parse (the real parser)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "[1/3] PowerShell AST parse" -ForegroundColor Cyan
+Write-Host "[1/4] PowerShell AST parse" -ForegroundColor Cyan
 foreach ($f in $files) {
     $tokens = $null
     $errors = $null
@@ -98,7 +104,7 @@ foreach ($f in $files) {
 # 2. PSScriptAnalyzer
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "[2/3] PSScriptAnalyzer" -ForegroundColor Cyan
+Write-Host "[2/4] PSScriptAnalyzer" -ForegroundColor Cyan
 if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
     if ($InstallAnalyzer) {
         Write-Host "  installing PSScriptAnalyzer (CurrentUser)..."
@@ -131,7 +137,7 @@ if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
 # 3. Project-specific rules (the bugs that actually bit us)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "[3/3] Project rules" -ForegroundColor Cyan
+Write-Host "[3/4] Project rules" -ForegroundColor Cyan
 
 foreach ($f in $files) {
     $ast = $null
@@ -285,6 +291,68 @@ foreach ($f in $files) {
                 Write-Host "        Multi-product script: this will be WRONG for every other -Product." -ForegroundColor Yellow
                 Write-Host "        Move it to the profile table and read it from `$P.<Field>." -ForegroundColor Yellow
             }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 4. Product config data file (config\Products.psd1)
+# ---------------------------------------------------------------------------
+# This is the file operators hand-edit, so a bad edit must fail HERE - in seconds - and not
+# four hours into a build. Same validation the slipstream applies at startup.
+Write-Host ""
+Write-Host "[4/4] Product config" -ForegroundColor Cyan
+$cfg = Join-Path $Path 'config\Products.psd1'
+if (-not (Test-Path $cfg)) {
+    Write-Host "  FAIL  config\Products.psd1 not found - the slipstream cannot run without it." -ForegroundColor Red
+    $failures++
+} else {
+    $products = $null
+    try {
+        $products = Import-PowerShellDataFile -Path $cfg -ErrorAction Stop
+    } catch {
+        Write-Host ("  FAIL  config\Products.psd1 is not valid PowerShell data: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host "        It must be ONE hashtable of literals - no commands, variables or expressions." -ForegroundColor Red
+        $failures++
+    }
+    if ($products) {
+        $required = @('Label','IsoPrefix','BasePath','SourceISO','LcuQuery','LcuInclude',
+                      'SafeOsQuery','SafeOsInclude','SetupQuery','SetupInclude',
+                      'DotNetQuery','DotNetInclude')
+        $bad = 0
+        foreach ($name in ($products.Keys | Sort-Object)) {
+            $prof = $products[$name]
+            $errs = @()
+            if ($prof -isnot [hashtable]) { $errs += 'not a hashtable' }
+            else {
+                foreach ($f in $required) {
+                    if (-not $prof.ContainsKey($f)) { $errs += "missing '$f'" }
+                    elseif ([string]::IsNullOrWhiteSpace([string]$prof[$f])) { $errs += "'$f' is empty" }
+                }
+                if ($prof.ContainsKey('DefaultEditions') -and $null -ne $prof['DefaultEditions']) {
+                    foreach ($e in @($prof['DefaultEditions'])) {
+                        # Names are matched with -eq. A wildcard here matches NOTHING, silently.
+                        if ("$e" -match '[\*\?]') { $errs += "DefaultEditions '$e' contains a wildcard (matched with -eq => matches NOTHING)" }
+                    }
+                }
+            }
+            if ($errs.Count -gt 0) {
+                $bad++
+                Write-Host ("  FAIL  [{0}] {1}" -f $name, ($errs -join '; ')) -ForegroundColor Red
+            } else {
+                $def = if ($null -eq $prof['DefaultEditions']) { 'ALL editions' } else { "$(@($prof['DefaultEditions']).Count) edition(s)" }
+                Write-Host ("  ok    {0,-12} -> {1}_<stamp>.iso  ({2})" -f $name, $prof['IsoPrefix'], $def) -ForegroundColor Green
+            }
+        }
+        if ($bad -gt 0) { $failures++ }
+
+        # The detector globs 'Server2025_Patched_*.iso' to find and archive the monthly build.
+        # Rename that prefix and the scheduled task keeps "succeeding" while archiving nothing.
+        if ($products.ContainsKey('Server2025') -and $products['Server2025']['IsoPrefix'] -ne 'Server2025_Patched') {
+            $failures++
+            Write-Host "  FAIL  Server2025.IsoPrefix must be 'Server2025_Patched'." -ForegroundColor Red
+            Write-Host "        Watch-Server2025Updates.ps1 archives the build by globbing 'Server2025_Patched_*.iso'." -ForegroundColor Red
+            Write-Host "        Changing it makes the scheduled task silently archive nothing." -ForegroundColor Red
         }
     }
 }

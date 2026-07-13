@@ -15,7 +15,7 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **2.1.3** — see [CHANGELOG.md](CHANGELOG.md).
+Version **3.2.0** — see [CHANGELOG.md](CHANGELOG.md).
 
 > **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
 > `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
@@ -29,7 +29,7 @@ Version **2.1.3** — see [CHANGELOG.md](CHANGELOG.md).
 .\tests\Install-GitHook.ps1                       # block bad commits automatically
 ```
 
-Real AST parse + PSScriptAnalyzer + project-specific rules. See [CONTRIBUTING.md](CONTRIBUTING.md)
+Real AST parse + PSScriptAnalyzer + project rules + validation of `config/Products.psd1`. See [CONTRIBUTING.md](CONTRIBUTING.md)
 for why this exists and the VERIFIED/UNVERIFIED protocol for AI-authored changes.
 
 ## Why this exists
@@ -48,12 +48,15 @@ server2025-servicing/
 ├── README.md
 ├── CHANGELOG.md
 ├── .gitignore                       # excludes ISOs, WIMs, .msu/.cab, logs, scratch
+├── config/
+│   └── Products.psd1                # PRODUCT PROFILES - the only file you should need to edit
 ├── scripts/
 │   ├── Slipstream-WindowsMedia.ps1  # build patched ISO (Server 2025 / Win11; edition subset + trim)
 │   ├── Repair-Server2025Store.ps1   # repair a live host's store (+WinRE)
 │   ├── Check-Packages.ps1           # verify a WIM has needed payloads pre-repair
 │   └── Watch-Server2025Updates.ps1  # daily detector -> triggers build on new LCU
 ├── docs/
+│   ├── EDITIONS.md                  # DefaultEditions + the selection resolver (READ BEFORE EDITING config/)
 │   ├── RUNBOOK.md                   # step-by-step operational procedures
 │   ├── LESSONS-LEARNED.md           # the non-obvious gotchas, with fixes
 │   └── INCIDENT-csFiles.md          # the real case this tooling was hardened against
@@ -102,6 +105,16 @@ the profile's `DefaultEditions` (exact-name match) → all; then `-ExcludeEditio
 `-ExcludeN` are subtracted. `-ExcludeN` matches `N` as a **case-sensitive standalone token**,
 so it correctly drops *Windows 11 Pro **N** for Workstations* without touching
 *Windows 11 Pro for Workstations*.
+
+> **Editing which editions get patched?** Edit **`config/Products.psd1`** — a restricted-language
+> data file, never the script. `DefaultEditions` has sharp edges:
+> `$null` means **all** editions (Server 2025 depends on this — its `install.wim` is also the
+> repair source), names are matched **exactly** (no wildcards — unlike `-EditionName`), and
+> `-Index`/`-EditionName` **replace** the defaults rather than extending them.
+> **Read [docs/EDITIONS.md](docs/EDITIONS.md) before touching it.** The quality gate validates
+> the config (bad syntax, missing fields, wildcards in `DefaultEditions`) in seconds — run it,
+> then confirm with `-ListEditions` and `-DryRun` before starting a multi-hour build.
+> `-ListProducts` shows what the config currently defines.
 
 > **`-TrimMedia` renumbers `install.wim`.** Anything that selects an edition *by index* —
 > `autounattend.xml` (`/IMAGE/INDEX`), MDT/SCCM task sequences, WDS, `dism /apply-image /index:N`
