@@ -56,7 +56,7 @@
     .\Repair-Server2025Store.ps1 -FodSource G:\LanguagesAndOptionalFeatures -InstallWim F:\sources\install.wim -Index 4
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.0.1
     Project : server2025-servicing
     License : MIT
 #>
@@ -76,7 +76,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 function Get-TS { '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 function Info  ($m) { Write-Host  "$(Get-TS): $m" }
 function Warn  ($m) { Write-Warning "$(Get-TS): $m" }
@@ -270,7 +270,9 @@ finally {
     # 5. Preserve the logs that actually contain the detail
     foreach ($f in @('C:\Windows\Logs\CBS\CBS.log','C:\Windows\Logs\DISM\dism.log')) {
         if (Test-Path $f) {
-            try { Copy-Item $f (Join-Path $LogDir ("{0}_{1}" -f $stamp,(Split-Path $f -Leaf))) -Force; Info "Saved $(Split-Path $f -Leaf) to $LogDir" } catch {}
+            # Best-effort: CBS.log/dism.log can be locked by TrustedInstaller mid-servicing.
+            try { Copy-Item $f (Join-Path $LogDir ("{0}_{1}" -f $stamp,(Split-Path $f -Leaf))) -Force; Info "Saved $(Split-Path $f -Leaf) to $LogDir" }
+            catch { Warn "Could not copy $(Split-Path $f -Leaf) (likely locked): $($_.Exception.Message)" }
         }
     }
     Info "Transcript: $logFile"

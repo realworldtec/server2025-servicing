@@ -22,7 +22,7 @@
     Path to Watch-Server2025Updates.ps1. Default: ..\scripts\Watch-Server2025Updates.ps1.
 
 .PARAMETER SlipstreamScript
-    Path to Slipstream-Server2025.ps1. Default: ..\scripts\Slipstream-Server2025.ps1.
+    Path to Slipstream-WindowsMedia.ps1. Default: ..\scripts\Slipstream-WindowsMedia.ps1.
 
 .PARAMETER OutputDir
     Slipstream working + output dir. Default D:\Server2025Patching (needs ~30-40 GB free).
@@ -53,7 +53,7 @@
     .\Register-SlipstreamSchedule.ps1 -ShareRoot 'D:\PatchedImages' -KeepLast 6 -MonthlyOnly
 
 .NOTES
-    Version : 1.1.3
+    Version : 1.2.0
     Project : server2025-servicing
     License : MIT
     Run elevated on the decoupled management/build host (must have ADK + WinPE).
@@ -77,12 +77,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.1.3'
+$ScriptVersion = '1.2.0'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Split-Path $here -Parent
 
 if (-not $WatchScript)      { $WatchScript      = Join-Path $repo 'scripts\Watch-Server2025Updates.ps1' }
-if (-not $SlipstreamScript) { $SlipstreamScript = Join-Path $repo 'scripts\Slipstream-Server2025.ps1' }
+if (-not $SlipstreamScript) { $SlipstreamScript = Join-Path $repo 'scripts\Slipstream-WindowsMedia.ps1' }
 if (-not $StateFile)        { $StateFile        = Join-Path $OutputDir 'state\last-built.json' }
 foreach ($p in @($WatchScript,$SlipstreamScript)) { if (-not (Test-Path $p)) { throw "Script not found: $p" } }
 if (-not (Test-Path $ShareRoot)) { Write-Warning "ShareRoot not reachable right now: $ShareRoot (task still registered; verify access under the run-as account)." }
@@ -124,4 +124,4 @@ Write-Host "State    : $StateFile"
 Write-Host ""
 Write-Host "Dry-run the detector now (no build unless a new LCU is out):"
 Write-Host "  Start-ScheduledTask -TaskName '$TaskName'    # then watch $OutputDir\logs\Watch_*.log"
-Write-Host "Force a one-off build regardless of state: delete $StateFile, or run Slipstream-Server2025.ps1 directly."
+Write-Host "Force a one-off build regardless of state: delete $StateFile, or run Slipstream-WindowsMedia.ps1 directly."

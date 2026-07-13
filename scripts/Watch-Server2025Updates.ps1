@@ -17,7 +17,7 @@
       4. Otherwise exit quietly. Catalog hiccups are non-fatal (retry tomorrow).
 
 .PARAMETER SlipstreamScript
-    Path to Slipstream-Server2025.ps1.
+    Path to Slipstream-WindowsMedia.ps1.
 
 .PARAMETER OutputDir
     Slipstream working + output dir (passed to the slipstream as -BasePath, so the two always
@@ -43,12 +43,12 @@
     Transcript folder. Default <OutputDir>\logs.
 
 .EXAMPLE
-    .\Watch-Server2025Updates.ps1 -SlipstreamScript .\Slipstream-Server2025.ps1 `
+    .\Watch-Server2025Updates.ps1 -SlipstreamScript .\Slipstream-WindowsMedia.ps1 `
         -SourceISO 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO' `
         -ShareRoot 'D:\PatchedImages' -KeepLast 12
 
 .NOTES
-    Version : 1.0.5
+    Version : 1.1.0
     Project : server2025-servicing
     License : MIT
     Intended to run on a decoupled management/build host (ADK + WinPE), elevated.
@@ -69,7 +69,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.5'
+$ScriptVersion = '1.1.0'
 if ($SourceISO -and -not (Test-Path $SourceISO)) { throw "SourceISO not found on this host: $SourceISO" }
 if (-not $StateFile) { $StateFile = Join-Path $OutputDir 'state\last-built.json' }
 if (-not $LogDir)    { $LogDir    = Join-Path $OutputDir 'logs' }
@@ -166,7 +166,9 @@ try {
     # 2. Compare to state
     $lastBuild = [Version]'0.0.0.0'
     if (Test-Path $StateFile) {
-        try { $lastBuild = [Version](Get-Content $StateFile -Raw | ConvertFrom-Json).Build } catch {}
+        # A corrupt/partial state file must NOT block a build - fall back to 0.0.0.0 (build anew).
+        try { $lastBuild = [Version](Get-Content $StateFile -Raw | ConvertFrom-Json).Build }
+        catch { Write-Warning "$(TS): State file unreadable ($($_.Exception.Message)); treating as never-built." }
     }
     if ($latest.Build -le $lastBuild) {
         Write-Output "$(TS): No new build (latest $($latest.Build) <= last built $lastBuild). Nothing to do."
@@ -184,7 +186,11 @@ try {
 
     # 3. Build. Pass paths EXPLICITLY so nothing depends on the slipstream's own defaults
     #    (-BasePath is the slipstream's working+output dir, so it must equal $OutputDir).
-    $slipArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$SlipstreamScript,'-BasePath',$OutputDir)
+    # This detector's Catalog query is Server-2025-specific (see Get-LatestServerLcu), so it
+    # pins the slipstream to the matching product profile. A Windows 11 detector would be a
+    # separate task with its own state file.
+    $slipArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$SlipstreamScript,
+                  '-Product','Server2025','-BasePath',$OutputDir)
     if ($SourceISO) { $slipArgs += @('-SourceISO',$SourceISO) }
     if ($NoProxy)   { $slipArgs += '-NoProxy' }   # the slipstream makes its own Catalog calls
     Write-Output "$(TS): New build detected -> launching slipstream: $SlipstreamScript"
@@ -230,6 +236,7 @@ finally {
     # Sole owner of the transcript. Guarded: with $ErrorActionPreference='Stop', a redundant
     # Stop-Transcript throws "host is not currently transcribing", and a terminating error in
     # a finally block OVERRIDES the script's exit code (turning a clean 'exit 0' into 1).
-    try { Stop-Transcript | Out-Null } catch {}
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Verbose "transcript already stopped" }
 }
 exit $exit

@@ -14,7 +14,7 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **1.3.0** — see [CHANGELOG.md](CHANGELOG.md).
+Version **2.0.0** — see [CHANGELOG.md](CHANGELOG.md).
 
 > **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
 > `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
@@ -48,7 +48,7 @@ server2025-servicing/
 ├── CHANGELOG.md
 ├── .gitignore                       # excludes ISOs, WIMs, .msu/.cab, logs, scratch
 ├── scripts/
-│   ├── Slipstream-Server2025.ps1    # build patched ISO
+│   ├── Slipstream-WindowsMedia.ps1  # build patched ISO (Server 2025 / Win11; edition subset + trim)
 │   ├── Repair-Server2025Store.ps1   # repair a live host's store (+WinRE)
 │   ├── Check-Packages.ps1           # verify a WIM has needed payloads pre-repair
 │   └── Watch-Server2025Updates.ps1  # daily detector -> triggers build on new LCU

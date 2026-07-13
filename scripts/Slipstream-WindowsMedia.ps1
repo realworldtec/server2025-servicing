@@ -1,11 +1,14 @@
 <#
 .SYNOPSIS
-    Fully automated slipstream of the latest Windows Server 2025 (24H2) quality
-    updates into the RTM MLF media, producing a new bootable, fully-patched ISO.
+    Fully automated slipstream of the latest quality updates into Windows RTM media,
+    producing a new bootable, fully-patched ISO. Supports Windows Server 2025 and
+    Windows 11 (24H2 / 25H2), and can patch a SUBSET of editions and trim the media.
 
 .DESCRIPTION
     End-to-end, unattended pipeline that:
-      1. Creates the working folder tree under -BasePath (default D:\Server2025Patching).
+      0. Selects a product profile (-Product) that supplies the Catalog search strings.
+         -ListEditions enumerates the source media's editions and exits.
+      1. Creates the working folder tree under -BasePath (per-product default).
       2. Auto-downloads the current updates directly from the Microsoft Update Catalog
          (self-contained - no PowerShell module; retried search + BITS CDN downloads):
            - Latest Cumulative Update (LCU) + any prerequisite CHECKPOINT CUs
@@ -28,30 +31,62 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 1.0.3
+    Version    : 2.0.0   (was Slipstream-Server2025.ps1 v1.0.4 - now multi-product)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
     Windows ADK + WinPE add-on installed in the default location.
-    Latest Server 2025 LCU at time of writing: KB5094125 (2026-06, build 26100.32995).
-    Requires ~30-40 GB free on the -BasePath volume and internet access
+    Latest at time of writing: Server 2025 KB5094125 (26100.32995);
+                               Windows 11 25H2 KB5094126 (26200.8655) - LCU is ~5.4 GB.
+    Requires ~30-40 GB free on the -BasePath volume (more for Win11) and internet access
     (unless pre-staging updates). Mounted ISO drive letters are resolved dynamically.
 
 .EXAMPLE
-    powershell.exe -ExecutionPolicy Bypass -File .\Slipstream-Server2025.ps1
+    # What editions are in this ISO?
+    .\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -ListEditions
+
+.EXAMPLE
+    # Patch only Enterprise + Pro, and emit ONLY those two editions (smallest ISO)
+    .\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -EditionName '*Enterprise*','*Pro' -TrimMedia
+
+.EXAMPLE
+    # Server 2025, all editions (the original behaviour)
+    .\Slipstream-WindowsMedia.ps1 -Product Server2025
 #>
 
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    # Source RTM media (data volume; the ISO is mounted read-only during the build)
-    [string]$SourceISO   = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO',
+    # Which media family to service. Drives the Catalog search strings (see $PRODUCTS below).
+    [ValidateSet('Server2025','Win11-25H2','Win11-24H2')]
+    [string]$Product = 'Server2025',
 
-    # Base working directory for all extractions / mounts / output (needs ~30-40 GB free)
-    [string]$BasePath    = 'D:\Server2025Patching',
+    # Source RTM media (data volume; the ISO is mounted read-only during the build).
+    # Defaults to the per-product ISO in $PRODUCTS unless overridden here.
+    [string]$SourceISO,
 
-    # Volume label for the finished ISO (max 32 chars for UDF)
-    [string]$IsoLabel    = 'SERVER2025_PATCHED',
+    # Base working directory for all extractions / mounts / output (needs ~30-40 GB free,
+    # more for Win11: the 25H2 LCU alone is ~5.4 GB). Per-product default if omitted.
+    [string]$BasePath,
+
+    # Volume label for the finished ISO (max 32 chars for UDF). Per-product default if omitted.
+    [string]$IsoLabel,
+
+    # --- Edition selection (install.wim) -------------------------------------------------
+    # List the editions in the source media and exit. Nothing is downloaded or serviced.
+    [switch]$ListEditions,
+
+    # Patch ONLY these install.wim indexes (e.g. -Index 3,7). Empty = all editions.
+    [int[]]$Index,
+
+    # Patch ONLY editions whose ImageName matches any of these (wildcards ok, e.g.
+    # -EditionName '*Enterprise*','*Pro'). Combined with -Index as a UNION.
+    [string[]]$EditionName,
+
+    # Output install.wim contains ONLY the selected editions (smaller ISO). Indexes are
+    # renumbered 1..N in the output; the old->new mapping is logged.
+    # WITHOUT this switch, unselected editions are carried over UNPATCHED (mixed-build wim).
+    [switch]$TrimMedia,
 
     # Set $true to keep the expanded \newMedia folder after the ISO is built
     [switch]$KeepNewMedia,
@@ -67,9 +102,66 @@ param(
     [switch]$NoProxy
 )
 
+# ===========================================================================
+#  Product profiles - the ONLY place Catalog naming lives.
+#  VERIFIED against the live Microsoft Update Catalog:
+#    Server 2025 : "... for Microsoft server operating system version 24H2 ..."
+#    Win11 25H2  : "... for Windows 11, version 25H2 ..."   (note the comma)
+#  Win11-24H2 titles vary ("Windows 11 Version 24H2" / "versions 24H2 and 25H2"), so its
+#  regexes are deliberately tolerant. UNVERIFIED - confirm before relying on it.
+# ===========================================================================
+$PRODUCTS = @{
+    'Server2025' = @{
+        Label         = 'SERVER2025_PATCHED'
+        BasePath      = 'D:\Server2025Patching'
+        SourceISO     = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO'
+        PreferRegex   = 'server operating system'
+        LcuQuery      = 'Cumulative Update Microsoft server operating system version 24H2 x64'
+        LcuInclude    = 'Cumulative Update for Microsoft server operating system version 24H2'
+        SafeOsQuery   = 'Safe OS Dynamic Update Microsoft server operating system version 24H2 x64'
+        SafeOsInclude = 'Safe OS Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? versions? .*24H2)'
+        SetupQuery    = 'Setup Dynamic Update Microsoft server operating system version 24H2 x64'
+        SetupInclude  = 'Setup Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? versions? .*24H2)'
+        DotNetQuery   = 'Cumulative Update .NET Framework Microsoft server operating system version 24H2 x64'
+        DotNetInclude = 'Cumulative Update for \.NET Framework .*Microsoft server operating system version 24H2'
+    }
+    'Win11-25H2' = @{
+        Label         = 'WIN11_25H2_PATCHED'
+        BasePath      = 'D:\Win11_25H2_Patching'
+        SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_25h2_x64_dvd_41c521e7.iso'
+        PreferRegex   = $null                       # no server/client disambiguation needed
+        LcuQuery      = 'Cumulative Update for Windows 11 version 25H2 x64'
+        LcuInclude    = 'Cumulative Update for Windows 11,? version 25H2'
+        SafeOsQuery   = 'Safe OS Dynamic Update for Windows 11 version 25H2 x64'
+        SafeOsInclude = 'Safe OS Dynamic Update for Windows 11,? versions? .*25H2'
+        SetupQuery    = 'Setup Dynamic Update for Windows 11 version 25H2 x64'
+        SetupInclude  = 'Setup Dynamic Update for Windows 11,? versions? .*25H2'
+        DotNetQuery   = 'Cumulative Update .NET Framework Windows 11 version 25H2 x64'
+        DotNetInclude = 'Cumulative Update for \.NET Framework .*Windows 11,? version 25H2'
+    }
+    'Win11-24H2' = @{
+        Label         = 'WIN11_24H2_PATCHED'
+        BasePath      = 'D:\Win11_24H2_Patching'
+        SourceISO     = 'D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64.iso'
+        PreferRegex   = $null
+        LcuQuery      = 'Cumulative Update for Windows 11 version 24H2 x64'
+        LcuInclude    = 'Cumulative Update for Windows 11,? version 24H2'
+        SafeOsQuery   = 'Safe OS Dynamic Update for Windows 11 version 24H2 x64'
+        SafeOsInclude = 'Safe OS Dynamic Update for Windows 11,? versions? .*24H2'
+        SetupQuery    = 'Setup Dynamic Update for Windows 11 version 24H2 x64'
+        SetupInclude  = 'Setup Dynamic Update for Windows 11,? versions? .*24H2'
+        DotNetQuery   = 'Cumulative Update .NET Framework Windows 11 version 24H2 x64'
+        DotNetInclude = 'Cumulative Update for \.NET Framework .*Windows 11,? version 24H2'
+    }
+}
+$P = $PRODUCTS[$Product]
+if (-not $SourceISO) { $SourceISO = $P.SourceISO }
+if (-not $BasePath)  { $BasePath  = $P.BasePath }
+if (-not $IsoLabel)  { $IsoLabel  = $P.Label }
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '1.0.3'
+$ScriptVersion          = '2.0.0'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -129,7 +221,8 @@ foreach ($stale in @('install2.wim','boot2.wim','winre.wim','winre2.wim')) {
 }
 
 Start-Transcript -Path (Join-Path $LOG_DIR "Slipstream_$stamp.log") -Append | Out-Null
-Write-Output "$(Get-TS): ===== Windows Server 2025 slipstream (v$ScriptVersion) started ====="
+Write-Output "$(Get-TS): ===== Windows media slipstream (v$ScriptVersion) started ====="
+Write-Output "$(Get-TS): Product    : $Product"
 Write-Output "$(Get-TS): Source ISO : $SourceISO"
 Write-Output "$(Get-TS): Base path  : $BasePath"
 Write-Output "$(Get-TS): Output ISO : $OUTPUT_ISO"
@@ -139,19 +232,50 @@ $Script:MountedImagePaths = @()
 $Script:MountedISOs       = @()
 
 # ---------------------------------------------------------------------------
+#  -ListEditions: enumerate the source media's editions and exit. Fast - mounts the ISO
+#  read-only, downloads nothing, services nothing. Use it to pick -Index / -EditionName.
+# ---------------------------------------------------------------------------
+if ($ListEditions) {
+    if (-not (Test-Path $SourceISO)) { throw "Source ISO not found: $SourceISO" }
+    Write-Output "$(Get-TS): Mounting source ISO to enumerate editions..."
+    $lsDrive = Mount-IsoGetDrive -Path $SourceISO
+    try {
+        $lsWim = "$lsDrive`:\sources\install.wim"
+        if (-not (Test-Path $lsWim)) { throw "No install.wim at $lsWim (install.esd media is not supported by -ListEditions)." }
+        Write-Output ""
+        Get-WindowsImage -ImagePath $lsWim |
+            Select-Object ImageIndex, ImageName, @{N='SizeGB';E={[math]::Round($_.ImageSize/1GB,2)}} |
+            Format-Table -AutoSize | Out-String | Write-Output
+        Write-Output "Patch a subset with e.g.:  -Index 3,7    or    -EditionName '*Enterprise*'"
+        Write-Output "Add -TrimMedia to emit ONLY those editions (smaller ISO; indexes renumbered)."
+    }
+    finally {
+        Dismount-DiskImage -ImagePath $SourceISO | Out-Null
+        Stop-Transcript | Out-Null
+    }
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
 #  Cleanup trap - discards any half-finished mounts on failure
 # ---------------------------------------------------------------------------
 trap {
     Write-Warning "$(Get-TS): FATAL: $($_.Exception.Message)"
     Write-Warning $_.ScriptStackTrace
+    # Best-effort cleanup: every step below is allowed to fail without masking the real error
+    # that triggered the trap. Failures are surfaced via -Verbose rather than swallowed silently.
     foreach ($m in $Script:MountedImagePaths) {
-        try { Dismount-WindowsImage -Path $m -Discard -ErrorAction SilentlyContinue | Out-Null } catch {}
+        try { Dismount-WindowsImage -Path $m -Discard -ErrorAction SilentlyContinue | Out-Null }
+        catch { Write-Verbose "cleanup: dismount image '$m' failed: $($_.Exception.Message)" }
     }
     foreach ($iso in $Script:MountedISOs) {
-        try { Dismount-DiskImage -ImagePath $iso -ErrorAction SilentlyContinue | Out-Null } catch {}
+        try { Dismount-DiskImage -ImagePath $iso -ErrorAction SilentlyContinue | Out-Null }
+        catch { Write-Verbose "cleanup: dismount ISO '$iso' failed: $($_.Exception.Message)" }
     }
-    try { Clear-WindowsCorruptMountPoint | Out-Null } catch {}
-    try { Stop-Transcript | Out-Null } catch {}
+    try { Clear-WindowsCorruptMountPoint | Out-Null }
+    catch { Write-Verbose "cleanup: Clear-WindowsCorruptMountPoint failed: $($_.Exception.Message)" }
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Verbose "cleanup: transcript already stopped" }
     exit 1
 }
 
@@ -181,7 +305,7 @@ Write-Output "$(Get-TS): Using oscdimg: $OSCDIMG"
 # small metadata calls hit catalog.update.microsoft.com (each retried); the actual
 # packages are pulled from the download.windowsupdate.com CDN via BITS (resumable).
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$Script:CAT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Slipstream-Server2025'
+$Script:CAT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Slipstream-WindowsMedia'
 
 # Make PowerShell use the same proxy the browser uses. "Unable to connect to the remote
 # server" from Invoke-WebRequest (while a browser CAN reach the site) almost always means
@@ -270,7 +394,8 @@ function Get-CatalogDownloadUrl {
             ForEach-Object { $_.Value } | Sort-Object -Unique
     if (-not $urls) {
         $dump = Join-Path $LOG_DIR "DownloadDialog_$Guid.html"
-        try { $content | Out-File -FilePath $dump -Encoding UTF8 } catch {}
+        try { $content | Out-File -FilePath $dump -Encoding UTF8 }
+        catch { Write-Verbose "could not write dialog dump to '$dump': $($_.Exception.Message)" }
         Write-Warning "$(Get-TS): No download URLs parsed from dialog. Raw response saved to $dump for inspection."
     }
     return $urls
@@ -304,9 +429,15 @@ function Save-CatalogUpdate {
     Write-Host "$(Get-TS): Catalog search -> '$Query'"
     $rows = Search-Catalog -Query $Query |
             Where-Object { $_.Title -match $IncludeRegex -and $_.Title -notmatch $ExcludeRegex }
-    # Prefer server-named packages, then x64, when such variants exist.
-    if ($rows | Where-Object { $_.Title -match 'server operating system' }) { $rows = $rows | Where-Object { $_.Title -match 'server operating system' } }
-    if ($rows | Where-Object { $_.Title -match 'x64' })                     { $rows = $rows | Where-Object { $_.Title -match 'x64' } }
+    # Product-aware preference: Server media must prefer the server-named variant of a package
+    # (SafeOS/Setup DUs ship in both flavours). For Win11 there is nothing to disambiguate, so
+    # PreferRegex is $null - hardcoding 'server operating system' here would filter out EVERY
+    # Windows 11 result.
+    if ($P.PreferRegex) {
+        $preferred = @($rows | Where-Object { $_.Title -match $P.PreferRegex })
+        if ($preferred.Count -gt 0) { $rows = $preferred }
+    }
+    if ($rows | Where-Object { $_.Title -match 'x64' }) { $rows = $rows | Where-Object { $_.Title -match 'x64' } }
     if (-not $rows) {
         if ($Optional) { Write-Warning "$(Get-TS): No catalog match for '$Query' (optional) - skipping."; return 0 }
         throw "No catalog result for '$Query' matching /$IncludeRegex/."
@@ -387,9 +518,10 @@ $existingCU = Get-ChildItem $CU_FOLDER -Filter *.msu -ErrorAction SilentlyContin
 if ($ForceDownload -or -not $existingCU) {
     Get-ChildItem $CU_FOLDER -File -ErrorAction SilentlyContinue | Remove-Item -Force
     if (-not $haveCatalog) { Show-PrestageHelp; throw "Catalog unreachable and no LCU pre-staged in $CU_FOLDER." }
-    # Server 2025 (24H2) security LCU, x64. Its download dialog includes checkpoint .msu(s).
-    Save-CatalogUpdate -Query 'Cumulative Update Microsoft server operating system version 24H2 x64' `
-        -IncludeRegex 'Cumulative Update for Microsoft server operating system version 24H2' `
+    # Non-preview security LCU for the selected product, x64. Its download dialog includes any
+    # prerequisite checkpoint .msu(s) (24H2/25H2 lineage both use checkpoint CUs).
+    Save-CatalogUpdate -Query $P.LcuQuery `
+        -IncludeRegex $P.LcuInclude `
         -ExcludeRegex '\.NET|Preview|Dynamic' `
         -Destination $CU_FOLDER | Out-Null
 } else {
@@ -434,19 +566,15 @@ function Resolve-SinglePackage {
     return (Get-ChildItem $Destination -File | Select-Object -First 1).FullName
 }
 
-# NOTE: the SafeOS/Setup Dynamic Updates are keyed to build 26100 (24H2). Microsoft now
-# titles them "...Windows 11, versions 24H2 and 25H2" (they still service Server 2025's
-# WinRE); the match below accepts either the server-named or the 24H2 client-named package.
+# SafeOS/Setup Dynamic Updates: search strings come from the product profile. Server media
+# accepts either the server-named or the client-named (24H2) package - Microsoft ships the
+# SafeOS DU under both titles for the same build-26100 WinRE payload.
 $SAFE_OS_DU_PATH = Resolve-SinglePackage -Name 'SafeOS DU' -Destination $SAFEOS_DIR `
-    -Query 'Safe OS Dynamic Update Microsoft server operating system version 24H2 x64' `
-    -Include 'Safe OS Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? version.*24H2)'
+    -Query $P.SafeOsQuery -Include $P.SafeOsInclude
 $SETUP_DU_PATH = Resolve-SinglePackage -Name 'Setup DU' -Destination $SETUP_DIR `
-    -Query 'Setup Dynamic Update Microsoft server operating system version 24H2 x64' `
-    -Include 'Setup Dynamic Update for (Microsoft server operating system version 24H2|Windows 11,? version.*24H2)'
+    -Query $P.SetupQuery -Include $P.SetupInclude
 $DOTNET_CU_PATH = Resolve-SinglePackage -Name '.NET CU' -Destination $DOTNET_DIR -Optional `
-    -Query 'Cumulative Update .NET Framework Microsoft server operating system version 24H2 x64' `
-    -Include 'Cumulative Update for \.NET Framework .*Microsoft server operating system version 24H2' `
-    -Exclude 'Preview'
+    -Query $P.DotNetQuery -Include $P.DotNetInclude -Exclude 'Preview'
 
 Write-Output "$(Get-TS): CU folder    : $CU_FOLDER  ($((Get-ChildItem $CU_FOLDER -File).Count) file(s))"
 Write-Output "$(Get-TS): SafeOS DU    : $SAFE_OS_DU_PATH"
@@ -459,22 +587,25 @@ $INSTALL_WIM = Join-Path $MEDIA_NEW 'sources\install.wim'
 $BOOT_WIM    = Join-Path $MEDIA_NEW 'sources\boot.wim'
 
 # ---- Resume detection --------------------------------------------------------
-# A prior failure (e.g. at boot.wim) leaves \newMedia intact with a fully-serviced
-# install.wim. Re-servicing it costs hours, so detect that and skip straight to
-# boot.wim. "Serviced" = every install.wim index is above the RTM baseline (26100.1742).
-$RTM_BASE      = [Version]'10.0.26100.1742'
+# A prior failure (e.g. at boot.wim) leaves \newMedia intact with a serviced install.wim.
+# Re-servicing costs hours, so detect that and skip straight to boot.wim.
+#
+# Product-agnostic: instead of a hardcoded RTM baseline (which only ever worked for Server
+# 2025's 26100.1742), compare against the TARGET build we are about to apply, taken from the
+# LCU's Catalog title. If every index is already at/above it, there is nothing to do.
 $SERVICED_FLAG = Join-Path $MEDIA_NEW '.slipstream_installwim_done'
+$TARGET_BUILD  = if ($Script:LastPickedBuild) { [Version]$Script:LastPickedBuild } else { $null }
 $installServiced = $false
 if (-not $Fresh) {
     if (Test-Path $SERVICED_FLAG) {
         $installServiced = $true                       # fast, definitive marker
-    } elseif (Test-Path $INSTALL_WIM) {
-        # Fallback: query EACH index for its .Version (the no -Index form omits .Version).
+    } elseif ((Test-Path $INSTALL_WIM) -and $TARGET_BUILD) {
+        # Query EACH index for its .Version (the no -Index form omits .Version entirely).
         try {
             $allUp = $true
             foreach ($im in (Get-WindowsImage -ImagePath $INSTALL_WIM -ErrorAction Stop)) {
                 $d = Get-WindowsImage -ImagePath $INSTALL_WIM -Index $im.ImageIndex -ErrorAction Stop
-                if (-not $d.Version -or ([Version]$d.Version -le $RTM_BASE)) { $allUp = $false; break }
+                if (-not $d.Version -or ([Version]$d.Version -lt $TARGET_BUILD)) { $allUp = $false; break }
             }
             $installServiced = $allUp
         } catch { $installServiced = $false }
@@ -514,18 +645,46 @@ if ($installServiced) {
     }
 
     # ===========================================================================
-    #  4.  Service WinRE + every install.wim edition
+    #  4.  Service WinRE + the SELECTED install.wim editions
     # ===========================================================================
-    $WINOS_IMAGES = Get-WindowsImage -ImagePath $INSTALL_WIM
+    $WINOS_IMAGES = @(Get-WindowsImage -ImagePath $INSTALL_WIM)
     Write-Output "$(Get-TS): install.wim contains $($WINOS_IMAGES.Count) edition(s)."
 
-foreach ($IMAGE in $WINOS_IMAGES) {
+    # ---- Resolve the selection (union of -Index and -EditionName; empty = ALL) ----------
+    $selected = @()
+    if ($Index)       { $selected += @($WINOS_IMAGES | Where-Object { $Index -contains $_.ImageIndex }) }
+    if ($EditionName) {
+        foreach ($pat in $EditionName) {
+            $selected += @($WINOS_IMAGES | Where-Object { $_.ImageName -like $pat })
+        }
+    }
+    if (-not $Index -and -not $EditionName) { $selected = $WINOS_IMAGES }
+    $selected = @($selected | Sort-Object ImageIndex -Unique)
+    if ($selected.Count -eq 0) { throw "Edition selection matched nothing. Run with -ListEditions to see what is available." }
+
+    $selIdx = @($selected | ForEach-Object { $_.ImageIndex })
+    Write-Output "$(Get-TS): Editions selected for patching ($($selected.Count) of $($WINOS_IMAGES.Count)):"
+    foreach ($s in $selected) { Write-Output ("$(Get-TS):    [{0}] {1}" -f $s.ImageIndex, $s.ImageName) }
+
+    if ($selected.Count -lt $WINOS_IMAGES.Count -and -not $TrimMedia) {
+        Write-Warning "$(Get-TS): MIXED-BUILD MEDIA: unselected editions are carried over UNPATCHED (still at RTM)."
+        Write-Warning "$(Get-TS): The resulting install.wim will contain editions at DIFFERENT builds. Do NOT use an"
+        Write-Warning "$(Get-TS): unpatched index as a RestoreHealth source for a patched host. Use -TrimMedia to emit"
+        Write-Warning "$(Get-TS): only the selected editions."
+    }
+
+    # WinRE is serviced ONCE and reused. It must come from a SELECTED edition - index 1 may
+    # not be in the selection.
+    $WINRE_SOURCE_IX = $selIdx[0]
+    Write-Output "$(Get-TS): WinRE will be sourced from index $WINRE_SOURCE_IX and reused for all serviced editions."
+
+foreach ($IMAGE in $selected) {
     $ix = $IMAGE.ImageIndex
     Write-Output "$(Get-TS): ---- Mounting main OS index $ix ($($IMAGE.ImageName)) ----"
     Mount-WindowsImage -ImagePath $INSTALL_WIM -Index $ix -Path $MAIN_OS_MOUNT | Out-Null
     $Script:MountedImagePaths += $MAIN_OS_MOUNT
 
-    if ($ix -eq 1) {
+    if ($ix -eq $WINRE_SOURCE_IX) {
         # ----- WinRE (serviced once, reused for every edition) -----
         Copy-Item "$MAIN_OS_MOUNT\windows\system32\recovery\winre.wim" "$WORKING\winre.wim" -Force
         Write-Output "$(Get-TS): Mounting WinRE"
@@ -591,13 +750,36 @@ foreach ($IMAGE in $WINOS_IMAGES) {
 
     Dismount-WindowsImage -Path $MAIN_OS_MOUNT -Save | Out-Null
     $Script:MountedImagePaths = $Script:MountedImagePaths | Where-Object { $_ -ne $MAIN_OS_MOUNT }
-
-    # Step 16: export edition into the consolidated install2.wim
-    Write-Output "$(Get-TS): Exporting index $ix"
-    Export-WindowsImage -SourceImagePath $INSTALL_WIM -SourceIndex $ix `
-        -DestinationImagePath "$WORKING\install2.wim" | Out-Null
+    # NOTE: the serviced edition is now saved back into $INSTALL_WIM. The export below (which
+    # runs after the loop) reads from $INSTALL_WIM, so it picks up the serviced content.
 }
+
+    # ---- Rebuild install.wim: which editions end up in the output media? ---------------
+    # -TrimMedia  : ONLY the selected (serviced) editions  -> smallest ISO, indexes renumbered.
+    # default     : ALL editions, in original order; unselected ones are copied over UNPATCHED.
+    $exportList = if ($TrimMedia) { $selected } else { $WINOS_IMAGES }
+    Write-Output "$(Get-TS): Building output install.wim from $($exportList.Count) edition(s)$(if($TrimMedia){' (TRIMMED)'})."
+
+    $map = @()
+    $newIx = 0
+    foreach ($IMAGE in $exportList) {
+        $ix = $IMAGE.ImageIndex
+        $newIx++
+        $state = if ($selIdx -contains $ix) { 'patched' } else { 'RTM (unpatched)' }
+        Write-Output ("$(Get-TS): Exporting source index {0} -> output index {1}  [{2}]  {3}" -f $ix, $newIx, $state, $IMAGE.ImageName)
+        Export-WindowsImage -SourceImagePath $INSTALL_WIM -SourceIndex $ix `
+            -DestinationImagePath "$WORKING\install2.wim" | Out-Null
+        $map += [pscustomobject]@{ SourceIndex = $ix; OutputIndex = $newIx; State = $state; ImageName = $IMAGE.ImageName }
+    }
+
     Move-Item "$WORKING\install2.wim" $INSTALL_WIM -Force
+
+    # The output index is what you pass to -Index for a repair or a deployment. It only matches
+    # the source index when nothing was trimmed - so always record the mapping.
+    Write-Output "$(Get-TS): ---- Edition index map (source -> output) ----"
+    $map | Format-Table SourceIndex, OutputIndex, State, ImageName -AutoSize | Out-String | Write-Output
+    $map | ConvertTo-Json | Set-Content -Path (Join-Path $LOG_DIR "EditionMap_$stamp.json") -Encoding UTF8
+    Write-Output "$(Get-TS): Index map saved to $LOG_DIR\EditionMap_$stamp.json"
     # Drop a resume marker so a later re-run (e.g. after a boot.wim/ISO failure) skips
     # the multi-hour install.wim phase instead of rebuilding it.
     Set-Content -Path $SERVICED_FLAG -Value ("serviced {0}" -f (Get-TS)) -ErrorAction SilentlyContinue

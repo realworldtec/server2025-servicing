@@ -8,6 +8,75 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [2.0.0] - 2026-07-13
+
+**BREAKING**: `scripts/Slipstream-Server2025.ps1` is retired and replaced by
+**`scripts/Slipstream-WindowsMedia.ps1`** (v2.0.0), a multi-product script.
+**Delete the old file and re-register the scheduled task** (its action embeds an absolute path):
+
+```powershell
+.\scheduled-task\Register-SlipstreamSchedule.ps1 -KeepLast 12
+```
+
+### Added
+- **`-Product`** profile table (`Server2025` | `Win11-25H2` | `Win11-24H2`) - the single place
+  Catalog naming lives. Per-product defaults for `-SourceISO`, `-BasePath`, `-IsoLabel`.
+  VERIFIED against the live Catalog: Server uses *"Microsoft server operating system version
+  24H2"*; Windows 11 uses *"Windows 11**,** version 25H2"* (note the comma). `Win11-24H2`
+  regexes are tolerant but **UNVERIFIED**.
+- **Edition selection**: `-ListEditions` (mount source ISO, print index/name/size, exit -
+  downloads nothing), `-Index 3,5,9`, `-EditionName '*Enterprise*'` (union of both).
+- **`-TrimMedia`**: output `install.wim` contains ONLY the selected editions. Indexes are
+  renumbered 1..N; the source->output map is printed AND written to
+  `<LogDir>\EditionMap_<stamp>.json`.
+- Without `-TrimMedia`, unselected editions are carried over **UNPATCHED** - the script now
+  emits a loud **MIXED-BUILD MEDIA** warning, because such a wim is unsafe as a RestoreHealth
+  source for a patched host.
+
+### Fixed
+- **WinRE is now sourced from the first SELECTED edition**, not hardcoded index 1. Patching a
+  subset that excluded index 1 would previously have serviced WinRE from an edition that was
+  never exported.
+- **Product-aware preference filter.** The old code unconditionally preferred titles matching
+  `server operating system`; on a Windows 11 search that filters out **every** result. Now
+  driven by the profile's `PreferRegex` ($null for client media).
+- **Resume detection is product-agnostic.** Replaced the hardcoded `10.0.26100.1742` RTM
+  baseline (Server-only) with a comparison against the TARGET build parsed from the LCU's
+  Catalog title.
+
+### Changed
+- `Watch-Server2025Updates.ps1` (-> v1.1.0) and `Register-SlipstreamSchedule.ps1` (-> v1.2.0)
+  now point at `Slipstream-WindowsMedia.ps1` and pin it to `-Product Server2025`. The detector's
+  own Catalog query remains Server-specific; a Windows 11 detector would be a separate task with
+  its own state file (not yet implemented).
+
+### Not verified
+- The Windows 11 servicing path has **not been executed** - only parsed. The Catalog strings are
+  verified against the live Catalog; the DISM servicing of Win11 media follows the identical
+  code path already proven on Server 2025.
+
+## [1.3.1] - 2026-07-13
+
+First release where every script has been **parsed by a real PowerShell parser** (the v1.3.0
+quality gate, run on a Windows host). All 7 scripts pass the AST parse and the project rules.
+
+### Changed
+- **`scripts/Slipstream-Server2025.ps1`** (-> v1.0.4), **`scripts/Watch-Server2025Updates.ps1`**
+  (-> v1.0.6), **`scripts/Repair-Server2025Store.ps1`** (-> v1.0.1) - replaced all 8 empty
+  `catch {}` blocks (flagged by `PSAvoidUsingEmptyCatchBlock`) with explicit handlers that state
+  *why* the failure is tolerated and surface it via `Write-Verbose` / `Write-Warning`:
+  cleanup-trap dismounts, the DownloadDialog debug dump, the locked-CBS.log copy, an unreadable
+  state file (now warns and treats the host as never-built), and the guarded `Stop-Transcript`.
+
+  Rationale: a gate that always prints warnings is a gate people stop reading. A **clean
+  baseline** means the *next* warning is signal.
+
+### Verified (not assumed)
+- `PSReviewUnusedParameter` on `Get-FileResilient` is a **false positive**: `$Url`/`$OutFile`
+  are used inside the scriptblock passed to `Invoke-Retry`, which PSScriptAnalyzer does not
+  trace into. The scriptblock closes over the defining scope; confirmed by the real build, which
+  downloaded KB5094125 and its checkpoint successfully. No change made.
+
 ## [1.3.0] - 2026-07-13
 
 Quality tooling. Motivation: the assistant that authored much of this code **cannot execute
@@ -241,7 +310,9 @@ Added
 - `docs/RUNBOOK.md`, `docs/LESSONS-LEARNED.md`, `docs/INCIDENT-csFiles.md`.
 - `scheduled-task/Register-SlipstreamSchedule.ps1` — monthly 2nd-Wednesday build + archive.
 
-[Unreleased]: https://example.com/server2025-servicing/compare/v1.3.0...HEAD
+[Unreleased]: https://example.com/server2025-servicing/compare/v2.0.0...HEAD
+[2.0.0]: https://example.com/server2025-servicing/compare/v1.3.1...v2.0.0
+[1.3.1]: https://example.com/server2025-servicing/compare/v1.3.0...v1.3.1
 [1.3.0]: https://example.com/server2025-servicing/compare/v1.2.4...v1.3.0
 [1.2.4]: https://example.com/server2025-servicing/compare/v1.2.3...v1.2.4
 [1.2.3]: https://example.com/server2025-servicing/compare/v1.2.2...v1.2.3
