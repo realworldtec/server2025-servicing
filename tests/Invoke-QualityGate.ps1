@@ -27,7 +27,13 @@
         table in a multi-product script. Whatever it configures will be wrong for every other
         -Product. (Real bug: the output ISO was named Server2025_Patched_*.iso on a Win11
         build - correct media, wrong name, and it would have been archived under the wrong
-        product.)
+        product.) Literals inside Write-* console text are ignored - a product name in a
+        LOG LINE is fine; a product name in a VALUE is the bug.
+      * Add-WindowsPackage -PackagePath pointing at a FOLDER (a $*_FOLDER / $*_DIR variable).
+        Checkpoint CUs must be DISCOVERED by DISM from the folder beside the target, never
+        applied explicitly; naming the folder applies them explicitly and fails 0x80070228.
+        Microsoft: "run DISM /add-package with the latest .msu file as the sole target".
+        (Real bug: killed a 25H2 build 30 minutes in.) $*_PATH vars are FILES and are fine.
 
 .PARAMETER Path
     Repo root to scan. Defaults to the parent of this script.
@@ -41,7 +47,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.1.0
+    Version : 1.2.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -213,7 +219,10 @@ foreach ($f in $files) {
             if ($el -is [System.Management.Automation.Language.CommandParameterAst] -and
                 $el.ParameterName -eq 'PackagePath') {
                 $val = $cmd.CommandElements[$k + 1].Extent.Text
-                if ($val -match '(?i)_?(folder|dir|path)\b' -and $val -notmatch '(?i)file') {
+                # Only a variable whose name ENDS in _FOLDER / _DIR is a folder.
+                # NOT *_PATH: $SAFE_OS_DU_PATH / $DOTNET_CU_PATH are single .msu/.cab FILES and
+                # are correct as -PackagePath targets. (v1.1.0 flagged them - false positive.)
+                if ($val -match '(?i)^\$\w*_(folder|dir)$') {
                     Write-Host ("  WARN  {0}:{1}  Add-WindowsPackage -PackagePath {2} looks like a FOLDER" -f `
                         $f.Name, $cmd.Extent.StartLineNumber, $val) -ForegroundColor Yellow
                     Write-Host "        Checkpoint CUs must be DISCOVERED, not applied explicitly. Pass the single" -ForegroundColor Yellow
@@ -253,6 +262,23 @@ foreach ($f in $files) {
             $off = $s.Extent.StartOffset
             $inSafe = $false
             foreach ($r in $safe) { if ($off -ge $r[0] -and $off -le $r[1]) { $inSafe = $true; break } }
+
+            # A product name in CONSOLE TEXT is fine (help text, log lines, usage examples).
+            # A product name in a VALUE is the bug - it configures something, and will be wrong
+            # for every other -Product. Skip literals whose enclosing command is a Write-*.
+            # (v1.1.0 flagged a -Index/-EditionName usage hint printed by Write-Output.)
+            if (-not $inSafe) {
+                $p = $s.Parent
+                while ($p) {
+                    if ($p -is [System.Management.Automation.Language.CommandAst] -and
+                        $p.GetCommandName() -match '^(?i)Write-(Output|Host|Warning|Verbose|Debug|Information)$') {
+                        $inSafe = $true
+                        break
+                    }
+                    $p = $p.Parent
+                }
+            }
+
             if (-not $inSafe) {
                 Write-Host ("  WARN  {0}:{1}  product literal '{2}' outside `$PRODUCTS" -f `
                     $f.Name, $s.Extent.StartLineNumber, $s.Value) -ForegroundColor Yellow
