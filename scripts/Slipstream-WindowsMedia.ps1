@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 2.1.4   (checkpoint CU applied per MS method: target LCU as sole target)
+    Version    : 2.2.0   (pre-flight ALREADY-BUILT guard; target identity survives pre-staged runs)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -120,6 +120,10 @@ param(
 
     # Ignore any existing \newMedia and rebuild everything from the source ISO
     [switch]$Fresh,
+
+    # Build even if an ISO for this exact target build already exists (see the pre-flight
+    # "ALREADY BUILT" guard). Use this to re-cut media with a different edition selection.
+    [switch]$Rebuild,
 
     # Force a DIRECT connection - skip system-proxy detection entirely. Use when running as
     # SYSTEM on a host whose SYSTEM WinINET hive (HKU\S-1-5-18) has a stale proxy configured.
@@ -223,7 +227,7 @@ $SELECTION = @{
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '2.1.4'
+$ScriptVersion          = '2.2.0'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -702,6 +706,39 @@ if ($ForceDownload -or -not $existingCU) {
     Write-Output "$(Get-TS): Using pre-staged CU package(s): $($existingCU.Name -join ', ')"
 }
 
+# ---- Target identity (KB + build), persisted beside the packages --------------
+# $Script:LastPickedKB / $Script:LastPickedBuild are set ONLY by the Catalog search. On a
+# PRE-STAGED or offline re-run the Catalog is never queried ("All update packages already
+# staged - skipping Catalog reachability probe"), so both are $null. That silently disabled:
+#   * the target-LCU match  -> "Target LCU KB not known; using largest CU file as target"
+#   * the RESUME check      -> $TARGET_BUILD was $null, so it never ran and every edition was
+#                              re-serviced from scratch (~4 h on Server 2025).
+#   * the ALREADY-BUILT guard below.
+# Fix: write the identity next to the packages it describes, and restore it when re-running.
+$TARGET_JSON = Join-Path $CU_FOLDER '.target.json'
+if ($Script:LastPickedKB -and $Script:LastPickedBuild) {
+    [pscustomobject]@{
+        KB       = $Script:LastPickedKB
+        Build    = $Script:LastPickedBuild
+        PickedAt = (Get-TS)
+    } | ConvertTo-Json | Set-Content -Path $TARGET_JSON -Encoding UTF8
+}
+elseif (Test-Path $TARGET_JSON) {
+    try {
+        $t = Get-Content $TARGET_JSON -Raw | ConvertFrom-Json
+        if ($t.KB)    { $Script:LastPickedKB    = $t.KB }
+        if ($t.Build) { $Script:LastPickedBuild = $t.Build }
+        Write-Output "$(Get-TS): Target restored from staged packages: $($Script:LastPickedKB) (build $($Script:LastPickedBuild))"
+    } catch {
+        Write-Warning "$(Get-TS): Could not read $TARGET_JSON - resume and already-built checks are DISABLED for this run."
+    }
+}
+else {
+    Write-Warning "$(Get-TS): Packages are pre-staged but there is no .target.json beside them."
+    Write-Warning "$(Get-TS): The target build is therefore unknown: RESUME and the ALREADY-BUILT guard are DISABLED."
+    Write-Warning "$(Get-TS): Delete $CU_FOLDER and re-run to let the Catalog re-identify the target, or pass -Fresh knowingly."
+}
+
 # Identify the TARGET LCU file (as opposed to its prerequisite checkpoint).
 #
 # The target LCU file is the SOLE -PackagePath target for ALL THREE images:
@@ -777,6 +814,42 @@ $BOOT_WIM    = Join-Path $MEDIA_NEW 'sources\boot.wim'
 # LCU's Catalog title. If every index is already at/above it, there is nothing to do.
 $SERVICED_FLAG = Join-Path $MEDIA_NEW '.slipstream_installwim_done'
 $TARGET_BUILD  = if ($Script:LastPickedBuild) { [Version]$Script:LastPickedBuild } else { $null }
+
+# ---- Pre-flight: have we already built media for this exact target? -----------
+# The RESUME check only rescues a FAILED run. Nothing used to stop a REDUNDANT one: running
+# the script by hand when the current LCU had already been built happily re-serviced every
+# edition for hours and produced a byte-pointless second ISO. The detector
+# (Watch-Server2025Updates.ps1) has always had this guard via state\last-built.json - but
+# running the slipstream DIRECTLY bypassed the detector entirely.
+#
+# Every successful build now drops a manifest sidecar next to the ISO. Check it BEFORE we
+# extract anything. This runs in seconds, and costs nothing when there is no match.
+if ($TARGET_BUILD -and -not $Rebuild) {
+    foreach ($m in @(Get-ChildItem $BasePath -Filter "$($P.IsoPrefix)_*.iso.json" -File -ErrorAction SilentlyContinue)) {
+        $mf = $null
+        try { $mf = Get-Content $m.FullName -Raw | ConvertFrom-Json } catch { continue }
+        if (-not $mf) { continue }
+        if ($mf.TargetBuild -ne $Script:LastPickedBuild) { continue }
+        if ([bool]$mf.Trimmed -ne [bool]$TrimMedia)      { continue }
+
+        $priorIso = $m.FullName -replace '\.json$', ''
+        if (-not (Test-Path $priorIso)) { continue }   # manifest orphaned; ignore it
+
+        Write-Output ""
+        Write-Output "$(Get-TS): ===== ALREADY BUILT - nothing to do ====="
+        Write-Output "$(Get-TS): Target build : $($Script:LastPickedBuild)  ($($Script:LastPickedKB))"
+        Write-Output "$(Get-TS): Existing ISO : $priorIso"
+        Write-Output "$(Get-TS): Built at     : $($mf.BuiltAt)"
+        Write-Output "$(Get-TS): Editions     : $($mf.Editions -join ', ')"
+        Write-Output "$(Get-TS): Trimmed      : $($mf.Trimmed)"
+        Write-Output ""
+        Write-Output "$(Get-TS): The current LCU is already slipstreamed into that media. Re-running would"
+        Write-Output "$(Get-TS): re-service every edition (hours) and produce an identical ISO."
+        Write-Output "$(Get-TS): Pass -Rebuild to build anyway (e.g. to re-cut with a different edition set)."
+        exit 0
+    }
+}
+
 $installServiced = $false
 if (-not $Fresh) {
     if (Test-Path $SERVICED_FLAG) {
@@ -1078,6 +1151,23 @@ $lcuPkgs = Get-WindowsPackage -Path $verifyMount |
 Write-Output "$(Get-TS): Patched install.wim (index 1) build version: $ver"
 Write-Output "$(Get-TS): Update packages present in image:"
 $lcuPkgs | Select-Object PackageName, PackageState | Format-Table -AutoSize | Out-String | Write-Output
+
+# ---- Manifest sidecar --------------------------------------------------------
+# Written from the SHIPPED media (not from in-memory selection state), so it is true on both
+# the full-build and the resume path. The pre-flight ALREADY-BUILT guard reads these.
+$shipped = @(Get-WindowsImage -ImagePath $vWim | Sort-Object ImageIndex)
+[pscustomobject]@{
+    Product     = $Product
+    TargetBuild = $Script:LastPickedBuild
+    LcuKB       = $Script:LastPickedKB
+    ActualBuild = "$ver"
+    Trimmed     = [bool]$TrimMedia
+    Editions    = @($shipped | ForEach-Object { $_.ImageName })
+    Iso         = $OUTPUT_ISO
+    BuiltAt     = (Get-TS)
+    ScriptVer   = $ScriptVersion
+} | ConvertTo-Json | Set-Content -Path "$OUTPUT_ISO.json" -Encoding UTF8
+Write-Output "$(Get-TS): Manifest written: $OUTPUT_ISO.json  (re-runs for this build will now no-op)"
 
 Dismount-WindowsImage -Path $verifyMount -Discard | Out-Null
 $Script:MountedImagePaths = $Script:MountedImagePaths | Where-Object { $_ -ne $verifyMount }
