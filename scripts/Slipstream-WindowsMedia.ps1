@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 3.2.0   (product profiles externalised to config\Products.psd1)
+    Version    : 3.3.0   (slipstream archives + prunes; ArchiveRoot/KeepLast in config)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -66,6 +66,16 @@ param(
     # Product profiles. A PowerShell DATA file (restricted language - literals only, no code).
     # This is the ONLY file an operator should need to edit. See docs/EDITIONS.md.
     [string]$ConfigPath,
+
+    # Shared/historical location for finished ISOs. Per-product default from the config
+    # (ArchiveRoot). Pass '' to skip archiving for this run.
+    [string]$ArchiveRoot,
+
+    # Historical builds of THIS product to retain in the archive. Per-product default from the
+    # config (KeepLast). ValidateRange starts at 1: -KeepLast 0 means Select-Object -Skip 0,
+    # which skips NOTHING and would prune the ISO you just archived.
+    [ValidateRange(1,999)]
+    [int]$KeepLast = 0,
 
     # Print the products defined in the config and exit.
     [switch]$ListProducts,
@@ -236,6 +246,15 @@ if (-not $SourceISO) { $SourceISO = $P.SourceISO }
 if (-not $BasePath)  { $BasePath  = $P.BasePath }
 if (-not $IsoLabel)  { $IsoLabel  = $P.Label }
 
+# Archive settings: command line wins, else the profile, else off.
+# $PSBoundParameters is the ONLY way to tell "-ArchiveRoot ''" (deliberately disable archiving)
+# apart from "-ArchiveRoot not supplied" (use the profile default). Testing -not $ArchiveRoot
+# would silently override the caller's explicit ''.
+if (-not $PSBoundParameters.ContainsKey('ArchiveRoot')) { $ArchiveRoot = [string]$P.ArchiveRoot }
+if ($KeepLast -eq 0) {
+    $KeepLast = if ($P.ContainsKey('KeepLast') -and [int]$P.KeepLast -ge 1) { [int]$P.KeepLast } else { 12 }
+}
+
 # Explicit selection contract, built ONCE from the parameters and passed to
 # Resolve-EditionSelection. Keeps the resolver free of hidden script-scope dependencies.
 $SELECTION = @{
@@ -249,7 +268,7 @@ $SELECTION = @{
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '3.2.0'
+$ScriptVersion          = '3.3.0'
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
@@ -408,6 +427,7 @@ Write-Output "$(Get-TS): ===== Windows media slipstream (v$ScriptVersion) starte
 Write-Output "$(Get-TS): Product    : $Product"
 Write-Output "$(Get-TS): Source ISO : $SourceISO"
 Write-Output "$(Get-TS): Base path  : $BasePath"
+Write-Output "$(Get-TS): Archive    : $(if ($ArchiveRoot) { "$ArchiveRoot  (keep last $KeepLast)" } else { '(none - ISO stays in Base path)' })"
 Write-Output "$(Get-TS): Output ISO : $OUTPUT_ISO"
 
 # Track mounted images / ISOs so the cleanup trap can always tidy up.
@@ -1371,6 +1391,62 @@ $Script:MountedISOs = $Script:MountedISOs | Where-Object { $_ -ne $OUTPUT_ISO }
     ScriptVer   = $ScriptVersion
 } | ConvertTo-Json | Set-Content -Path "$OUTPUT_ISO.json" -Encoding UTF8
 Write-Output "$(Get-TS): Manifest written: $OUTPUT_ISO.json  (re-runs for this build will now no-op)"
+
+# ===========================================================================
+#  8b. Archive to the shared/historical location + retention
+# ===========================================================================
+# Archiving used to live ONLY in Watch-Server2025Updates.ps1, so running this script by hand
+# produced an ISO that was never copied anywhere - and there was no archiving at all for the
+# Win11 products, which have no detector. The thing that PRODUCES the artifact should be the
+# thing that KEEPS it. The detector no longer copies; it just verifies and stamps state.
+#
+# This runs AFTER the shipped-build assertion, so a failed verify can never archive a bad ISO
+# (the throw above happens first, and nothing below executes).
+if ($ArchiveRoot) {
+    try {
+        if (-not (Test-Path $ArchiveRoot)) { New-Item -ItemType Directory -Path $ArchiveRoot -Force | Out-Null }
+
+        # Free-space check BEFORE the copy. Filling the volume mid-copy leaves a truncated ISO
+        # in the archive that looks like a real build.
+        $isoSize = (Get-Item $OUTPUT_ISO).Length
+        $archRoot = [System.IO.Path]::GetPathRoot((Resolve-Path $ArchiveRoot).Path)
+        $free = (Get-PSDrive -Name $archRoot.TrimEnd('\:') -ErrorAction SilentlyContinue).Free
+        if ($free -and $free -lt ($isoSize * 1.1)) {
+            throw ("Not enough free space in $ArchiveRoot : need ~{0:N1} GB, have {1:N1} GB. Lower KeepLast in the config, or point ArchiveRoot at a bigger volume." -f ($isoSize*1.1/1GB), ($free/1GB))
+        }
+
+        Write-Output "$(Get-TS): Archiving to $ArchiveRoot"
+        Copy-Item $OUTPUT_ISO        (Join-Path $ArchiveRoot (Split-Path $OUTPUT_ISO -Leaf))          -Force
+        Copy-Item "$OUTPUT_ISO.json" (Join-Path $ArchiveRoot ((Split-Path $OUTPUT_ISO -Leaf) + '.json')) -Force
+
+        # The transcript is still open (Stop-Transcript runs at the very end), so copy it rather
+        # than move it; the copy is complete up to this line, which is all that matters.
+        $tLog = Join-Path $LOG_DIR "Slipstream_$stamp.log"
+        if (Test-Path $tLog) { Copy-Item $tLog (Join-Path $ArchiveRoot "Slipstream_$stamp.log") -Force }
+
+        # Retention: per-PRODUCT, keyed on this product's IsoPrefix. Products sharing one
+        # ArchiveRoot therefore never prune each other's builds. -File everywhere: a DIRECTORY
+        # matching the glob would otherwise be treated as an ISO.
+        $archived = @(Get-ChildItem $ArchiveRoot -Filter "$($P.IsoPrefix)_*.iso" -File -ErrorAction SilentlyContinue |
+                      Sort-Object LastWriteTime -Descending)
+        Write-Output "$(Get-TS): Archive holds $($archived.Count) $($P.IsoPrefix) build(s); keeping $KeepLast."
+        foreach ($old in @($archived | Select-Object -Skip $KeepLast)) {
+            Write-Output "$(Get-TS): pruning $($old.Name)"
+            Remove-Item $old.FullName          -Force -ErrorAction SilentlyContinue
+            Remove-Item "$($old.FullName).json" -Force -ErrorAction SilentlyContinue   # its manifest
+        }
+        Write-Output "$(Get-TS): Archived: $(Join-Path $ArchiveRoot (Split-Path $OUTPUT_ISO -Leaf))"
+    }
+    catch {
+        # The BUILD succeeded and was verified. A failed archive must not throw that away - the
+        # ISO is still on disk in $BasePath and is still good. Warn loudly, keep exit 0.
+        Write-Warning "$(Get-TS): ARCHIVE FAILED: $($_.Exception.Message)"
+        Write-Warning "$(Get-TS): The build itself is GOOD and verified. The ISO is at: $OUTPUT_ISO"
+        Write-Warning "$(Get-TS): Copy it to $ArchiveRoot by hand, or fix the cause and re-run (the guard will no-op the rebuild)."
+    }
+} else {
+    Write-Output "$(Get-TS): No ArchiveRoot configured for $Product - ISO stays in $BasePath."
+}
 
 # ===========================================================================
 #  9.  Cleanup

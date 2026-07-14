@@ -8,6 +8,63 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [3.3.0] - 2026-07-13 — the builder now archives what it builds
+
+### Fixed
+- **A hand-run build was never archived, and the Win11 products were never archived at all.**
+  Archiving to the shared/historical location lived *only* in `Watch-Server2025Updates.ps1`, so
+  it happened exactly once a month, only for Server 2025, and only via the scheduled task.
+  Running the slipstream directly — which is how the first real Win11 25H2 media was produced —
+  left the ISO sitting in `BasePath` with nothing copied to `D:\PatchedImages`. And the Win11
+  products have **no detector at all**, so nothing was ever going to archive them.
+
+  The thing that **produces** the artifact is now the thing that **keeps** it.
+  `Slipstream-WindowsMedia.ps1` (→ v3.3.0) copies the ISO, its `.json` manifest and the build
+  transcript to `ArchiveRoot` and applies retention — **after** the shipped-build assertion, so
+  a failed verify can never archive a bad ISO.
+
+### Added
+- **`ArchiveRoot` and `KeepLast` per product in `config/Products.psd1`.** Retention globs
+  `<IsoPrefix>_*.iso`, so products sharing one archive folder can never prune each other's
+  builds. Overridable per run with `-ArchiveRoot` / `-KeepLast`; `-ArchiveRoot ''` disables
+  archiving. The startup banner (and `-DryRun`) now shows the archive destination.
+- **A free-space check before the copy.** Filling the volume mid-copy would leave a truncated
+  ISO in the archive that looks like a real build.
+- **Capacity warning in the config.** At ~8.6 GB (Server) and ~7.9 GB (Win11) per ISO, the
+  defaults (12 / 6 / 6) come to **~197 GB** on a 256 GB volume, *plus* the 30–40 GB working
+  set. Sized deliberately and documented; lower `KeepLast` or move `ArchiveRoot` if that's tight.
+- **Quality gate (→ v1.4.0)** validates `ArchiveRoot`/`KeepLast` and rejects `KeepLast = 0` —
+  `Select-Object -Skip 0` skips **nothing**, so it would prune the ISO archived seconds earlier.
+
+### Changed
+- **`Watch-Server2025Updates.ps1` (→ v1.3.0) no longer copies the ISO.** It passes
+  `-ShareRoot`/`-KeepLast` through to the slipstream as `-ArchiveRoot`/`-KeepLast`, then just
+  verifies the manifest and stamps state. Previously both would have copied the same 8 GB file.
+  Existing scheduled-task parameters keep working unchanged — **no re-registration needed**.
+- An archive failure now **warns and keeps exit 0**: the build itself succeeded and was
+  verified, and throwing it away would rebuild it for four hours tomorrow.
+
+## [3.2.2] - 2026-07-13
+
+### Fixed
+- **Quality gate (→ v1.3.2): stage 3 printed nothing on a clean run.** Stages 1, 2 and 4 all
+  confirm what they checked; stage 3 only spoke when it had a finding — so a pass and a stage
+  that silently did nothing (a `continue` that swallowed every file, an AST predicate that never
+  matched, the new self-skip going too far) looked **identical**. A gate you cannot distinguish
+  from a no-op is not a gate. It now reports what it scanned:
+  `ok    no findings (6 script(s) scanned; rules A-E)`.
+
+## [3.2.1] - 2026-07-13
+
+### Fixed
+- **Quality gate (→ v1.3.1) flagged itself.** The new stage-4 config validation named its local
+  variable `$products`, and Rule D matches `$PRODUCTS` **case-insensitively** — so the gate
+  decided it was a multi-product script and warned about the very literals stage 4 asserts on
+  (`'Server2025'`, `'Server2025_Patched'`). Two fixes: the gate no longer runs the project rules
+  against **itself** (Rule D is about scripts that *consume* the product config; this one
+  *validates* it), and the local is renamed `$cfgProducts` so the collision cannot recur.
+  Cosmetic, but noise is exactly how a gate turns into something you skim past.
+
 ## [3.2.0] - 2026-07-13 — product profiles moved out of the script
 
 ### Changed — BREAKING (deployment)

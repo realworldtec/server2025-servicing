@@ -53,7 +53,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.3.2
+    Version : 1.4.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -355,6 +355,12 @@ if (-not (Test-Path $cfg)) {
                     if (-not $prof.ContainsKey($f)) { $errs += "missing '$f'" }
                     elseif ([string]::IsNullOrWhiteSpace([string]$prof[$f])) { $errs += "'$f' is empty" }
                 }
+                # KeepLast: 0 means Select-Object -Skip 0, which skips NOTHING - it would prune
+                # the ISO archived seconds earlier. Optional, but if present it must be >= 1.
+                if ($prof.ContainsKey('KeepLast') -and $null -ne $prof['KeepLast']) {
+                    $kl = 0; [void][int]::TryParse([string]$prof['KeepLast'], [ref]$kl)
+                    if ($kl -lt 1) { $errs += "KeepLast must be >= 1 (0 prunes the build you just made)" }
+                }
                 if ($prof.ContainsKey('DefaultEditions') -and $null -ne $prof['DefaultEditions']) {
                     foreach ($e in @($prof['DefaultEditions'])) {
                         # Names are matched with -eq. A wildcard here matches NOTHING, silently.
@@ -367,7 +373,8 @@ if (-not (Test-Path $cfg)) {
                 Write-Host ("  FAIL  [{0}] {1}" -f $name, ($errs -join '; ')) -ForegroundColor Red
             } else {
                 $def = if ($null -eq $prof['DefaultEditions']) { 'ALL editions' } else { "$(@($prof['DefaultEditions']).Count) edition(s)" }
-                Write-Host ("  ok    {0,-12} -> {1}_<stamp>.iso  ({2})" -f $name, $prof['IsoPrefix'], $def) -ForegroundColor Green
+                $arc = if ([string]::IsNullOrWhiteSpace([string]$prof['ArchiveRoot'])) { 'no archive' } else { "-> $($prof['ArchiveRoot']) keep $($prof['KeepLast'])" }
+                Write-Host ("  ok    {0,-12} {1}_<stamp>.iso  ({2}; {3})" -f $name, $prof['IsoPrefix'], $def, $arc) -ForegroundColor Green
             }
         }
         if ($bad -gt 0) { $failures++ }

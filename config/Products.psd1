@@ -32,6 +32,29 @@
 
     SourceISO        RTM media. Mounted read-only during the build; never modified.
 
+    ArchiveRoot      Where finished ISOs are KEPT - the shared / historical location. After a
+                     successful, VERIFIED build the ISO + its .json manifest + the build
+                     transcript are copied here, and old builds are pruned to KeepLast.
+                     Set to '' to disable archiving (the ISO then just stays in BasePath).
+
+                     A LOCAL folder is simplest - share it afterwards. If you point it at a
+                     UNC: the scheduled task runs as SYSTEM and hits the share as the MACHINE
+                     account (DOMAIN\HOST$), not as you.
+
+    KeepLast         Historical ISOs to retain in ArchiveRoot for THIS product. Pruning is
+                     per-product (it globs <IsoPrefix>_*.iso), so products sharing one
+                     ArchiveRoot can never delete each other's builds.
+
+                     *** SIZE THIS DELIBERATELY. *** Server 2025 ISOs are ~8.6 GB, Win11 ~7.9 GB:
+                         Server2025  KeepLast 12  ~= 103 GB
+                         Win11-25H2  KeepLast  6  ~=  47 GB
+                         Win11-24H2  KeepLast  6  ~=  47 GB
+                                                    --------
+                                                    ~197 GB  on a 256 GB volume - PLUS the
+                     30-40 GB working set. The defaults below already crowd D:. Lower them, or
+                     point ArchiveRoot at a bigger volume. Minimum 1 (0 would prune the ISO you
+                     just built).
+
     DefaultEditions  Which editions to patch when the caller names none (this is what the
                      scheduled task does). SEE docs/EDITIONS.md BEFORE EDITING.
 
@@ -80,6 +103,8 @@
         IsoPrefix       = 'Server2025_Patched'   # LOAD-BEARING - see note above
         BasePath        = 'D:\Server2025Patching'
         SourceISO       = 'D:\Server2025RTM\SW_DVD9_Win_Server_STD_CORE_2025_24H2_64Bit_English_DC_STD_MLF_X23-81891.ISO'
+        ArchiveRoot     = 'D:\PatchedImages'
+        KeepLast        = 12                     # ~103 GB at ~8.6 GB/ISO
 
         # $null = all 4 editions. The scheduled task relies on this, and so does the repair
         # runbook (this install.wim is the RestoreHealth source). Do not subset it.
@@ -101,6 +126,8 @@
         IsoPrefix       = 'Win11_25H2_Patched'
         BasePath        = 'D:\Win11_25H2_Patching'
         SourceISO       = 'D:\Win11RTM\en-us_windows_11_business_editions_version_25h2_x64_dvd_41c521e7.iso'
+        ArchiveRoot     = 'D:\PatchedImages'
+        KeepLast        = 6                      # ~47 GB at ~7.9 GB/ISO
 
         # Exact names, copied from -ListEditions. Indexes shown for orientation only - the
         # match is BY NAME, so a media re-layout cannot silently patch the wrong edition.
@@ -126,6 +153,8 @@
         IsoPrefix       = 'Win11_24H2_Patched'
         BasePath        = 'D:\Win11_24H2_Patching'
         SourceISO       = 'D:\Win11RTM\en-us_windows_11_business_editions_version_24h2_x64_dvd_59a1851e.iso'
+        ArchiveRoot     = 'D:\PatchedImages'
+        KeepLast        = 6                      # ~47 GB at ~7.9 GB/ISO
 
         DefaultEditions = @(
             'Windows 11 Enterprise'             # index 3

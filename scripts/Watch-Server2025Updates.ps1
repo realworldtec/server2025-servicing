@@ -69,7 +69,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.2.0'
+$ScriptVersion = '1.3.0'
 if ($SourceISO -and -not (Test-Path $SourceISO)) { throw "SourceISO not found on this host: $SourceISO" }
 if (-not $StateFile) { $StateFile = Join-Path $OutputDir 'state\last-built.json' }
 if (-not $LogDir)    { $LogDir    = Join-Path $OutputDir 'logs' }
@@ -228,6 +228,10 @@ try {
                   '-Product','Server2025','-BasePath',$OutputDir)
     if ($SourceISO) { $slipArgs += @('-SourceISO',$SourceISO) }
     if ($NoProxy)   { $slipArgs += '-NoProxy' }   # the slipstream makes its own Catalog calls
+    # Archiving + retention now happen INSIDE the slipstream (it produces the artifact, so it
+    # keeps it). Pass this task's settings through so -ShareRoot/-KeepLast still mean what the
+    # registrar says they mean, rather than silently deferring to the config file's defaults.
+    if ($ShareRoot) { $slipArgs += @('-ArchiveRoot',$ShareRoot,'-KeepLast',"$KeepLast") }
     Write-Output "$(TS): New build detected -> launching slipstream: $SlipstreamScript"
     Write-Output "$(TS):   -BasePath $OutputDir$(if($SourceISO){"  -SourceISO $SourceISO"})"
     & powershell.exe @slipArgs
@@ -261,37 +265,27 @@ try {
     }
     Write-Output "$(TS): Built ISO: $($iso.Name) ($([math]::Round($iso.Length/1GB,2)) GB), ships build $($mf.ActualBuild) - verified."
 
-    # 4. Archive + retention
+    # 4. Archive + retention  -- NOT DONE HERE ANY MORE.
+    # The SLIPSTREAM archives (and prunes), because it is the thing that produces the artifact.
+    # Doing it here meant a hand-run build was never archived at all, and the Win11 products -
+    # which have no detector - had no archiving whatsoever. Copying an 8 GB ISO twice would also
+    # be pure waste.
+    # -ShareRoot / -KeepLast are passed through to the slipstream (see $slipArgs above) so the
+    # scheduled task's existing parameters keep working unchanged.
     if ($ShareRoot) {
-        if (-not (Test-Path $ShareRoot)) { New-Item -ItemType Directory -Path $ShareRoot -Force | Out-Null }
-        Write-Output "$(TS): Archiving to $ShareRoot"
-        Copy-Item $iso.FullName (Join-Path $ShareRoot $iso.Name) -Force
-        # Archive the manifest too. It is the only record of WHICH LCU is inside the archived
-        # ISO - leaving it behind makes the archive unauditable.
-        Copy-Item $mfPath (Join-Path $ShareRoot (Split-Path $mfPath -Leaf)) -Force
-
-        # The slipstream writes its transcript to <BasePath>\logs, i.e. $OutputDir\logs - NOT to
-        # this detector's $LogDir. They only coincide by default; pass -LogDir and the build log
-        # was silently never archived (the `if ($log)` swallowed it).
-        $slipLogDir = Join-Path $OutputDir 'logs'
-        $log = Get-ChildItem $slipLogDir -Filter 'Slipstream_*.log' -File -ErrorAction SilentlyContinue |
-               Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($log) { Copy-Item $log.FullName (Join-Path $ShareRoot $log.Name) -Force }
-        else      { Write-Warning "$(TS): No slipstream log found in $slipLogDir to archive." }
-
-        # Prune ISOs, then their orphaned manifests. -File on both: a DIRECTORY named
-        # Server2025_Patched_*.iso would otherwise be selected as "the ISO", and Remove-Item
-        # -Force without -Recurse on a non-empty directory prompts or fails.
-        Get-ChildItem $ShareRoot -Filter 'Server2025_Patched_*.iso' -File |
-            Sort-Object LastWriteTime -Descending | Select-Object -Skip $KeepLast |
-            ForEach-Object {
-                Write-Output "$(TS): pruning $($_.Name)"
-                Remove-Item $_.FullName -Force
-                Remove-Item "$($_.FullName).json" -Force -ErrorAction SilentlyContinue
-            }
+        $archivedIso = Join-Path $ShareRoot $iso.Name
+        if (Test-Path $archivedIso) {
+            Write-Output "$(TS): Archived by the slipstream: $archivedIso"
+        } else {
+            # The slipstream warns and continues on archive failure (the build itself is good),
+            # so this is reachable. Surface it - but do NOT throw: the media is verified and on
+            # disk, and refusing to stamp state would rebuild it for 4 hours tomorrow.
+            Write-Warning "$(TS): Expected the slipstream to archive $($iso.Name) to $ShareRoot, but it is not there."
+            Write-Warning "$(TS): The build is verified and sits at $($iso.FullName). Check the slipstream log for ARCHIVE FAILED."
+        }
     }
 
-    # 5. Stamp state (only after a successful build + archive)
+    # 5. Stamp state (only after a successful, VERIFIED build)
     [pscustomobject]@{
         KB          = $latest.KB
         Build       = $latest.Build.ToString()
