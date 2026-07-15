@@ -121,9 +121,9 @@
     # Ordered list of products the scheduled task (Invoke-MediaJobs.ps1) builds, in order.
     # Trim this to limit unattended builds to the media you actually need.
     RunMediaJobs = @(
-        'Server2025'
         'Win11-25H2'
-        'Win11-24H2'
+        'Server2025'
+        #'Win11-24H2'
     )
 
     Products = @{
