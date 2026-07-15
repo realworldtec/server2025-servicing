@@ -8,6 +8,50 @@ All notable changes to this project are documented here. Format follows
 
 - Nothing yet.
 
+## [3.4.0] - 2026-07-15
+
+### Fixed
+- **A Ctrl+C'd run left `install.wim` mounted, and the next run died: "already mounted for
+  read/write access."** Ctrl+C kills the process without running the cleanup trap, and the
+  in-process mount list belongs to the dead process. `Slipstream-WindowsMedia.ps1` (→ v3.4.0)
+  now asks DISM (`Get-WindowsImage -Mounted`) at startup and discards any image mounted under
+  THIS product's working tree, then `Clear-WindowsCorruptMountPoint`. It keys on the mount path
+  (all our mounts live under `$WORKING`), so it never touches a different product's live mount.
+
+### Added
+- **`TrimByDefault` per profile — trimming is now the default for subset builds.** Forgetting
+  `-TrimMedia` on the July Win11 run produced a full mixed-build ISO (some editions patched, the
+  rest RTM) after servicing had already started. The Win11 profiles now set `TrimByDefault = $true`,
+  so a bare `-Product Win11-25H2` trims to the profile's editions. `Server2025` stays `$false`
+  (its `DefaultEditions` is `$null` = all editions — nothing to trim). Resolution: `-TrimMedia`
+  wins, then `-NoTrim` wins, else the profile flag. The startup banner prints `Trim media : …`.
+- **`-NoTrim`** switch to force full mixed-build media when a profile trims by default.
+- **`ISO_Inventory.ps1`** — read-only. Traverses the config, mounts each source ISO read-only,
+  lists its `install.wim` editions with PATCH markers (using the same exact-name rule as the
+  resolver), shows the trimmed source→output index map, and reports each `ArchiveRoot`'s
+  contents. No ADK required; safe to run during a build.
+- **`RunMediaJobs` + `Invoke-MediaJobs.ps1`.** The config now has a top-level ordered
+  `RunMediaJobs` list; `Invoke-MediaJobs.ps1` builds each product in turn (sequential — a build
+  pegs several cores, so parallel would thrash the one working volume). One product's failure
+  does not stop the rest; the runner exits non-zero if any failed. Trim `RunMediaJobs` to limit
+  which media build unattended without deleting the profiles.
+
+### Changed — BREAKING (config schema + scheduled task)
+- **`config/Products.psd1` is now nested:** `@{ RunMediaJobs = @(...); Products = @{ ... } }`.
+  All consumers accept the old flat schema too (so a half-updated deploy fails on a real error,
+  not "no products"), but the shipped config uses the nested form. **The scheduled task must be
+  re-registered.**
+- **`Register-SlipstreamSchedule.ps1` (→ v2.0.0) now schedules `Invoke-MediaJobs.ps1`**, not the
+  Server-only detector. Which products, where to archive, retention and the source ISO all come
+  from the config now, so the registrar only sets *when* and *as whom*. Remove the old task:
+  `Unregister-ScheduledTask -TaskName 'Server2025-Update-Watch' -Confirm:$false`.
+  `Watch-Server2025Updates.ps1` remains for anyone who specifically wants its `-MonthlyOnly`
+  (2nd-Tuesday-only) gate, which the direct-build path does not replicate.
+- **Quality gate (→ v1.5.0):** validates the nested schema, that every `RunMediaJobs` entry is a
+  defined product, and that `TrimByDefault` (if present) is a real boolean (a string `'yes'` is
+  truthy in a way that would silently trim). The config report shows trim/full per product.
+
+
 ## [3.3.0] - 2026-07-13 — the builder now archives what it builds
 
 ### Fixed

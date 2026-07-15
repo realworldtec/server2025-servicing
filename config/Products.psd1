@@ -15,7 +15,18 @@
         .\scripts\Slipstream-WindowsMedia.ps1 -Product <name> -DryRun     # before a 4-hour build
 
     ---------------------------------------------------------------------------------------
-    FIELD REFERENCE
+    TOP-LEVEL KEYS
+
+    RunMediaJobs     Ordered list of product names the scheduled task builds, in order, e.g.
+                     @('Server2025','Win11-25H2'). This is how you limit unattended builds to
+                     just the media you actually need - drop a product from the list and the
+                     nightly job stops building it (the profile stays defined for manual runs).
+                     Invoke-MediaJobs.ps1 reads this; -Jobs overrides it for a one-off run.
+
+    Products         The hashtable of product profiles (below). Each profile's fields:
+
+    ---------------------------------------------------------------------------------------
+    PROFILE FIELDS
 
     Label            ISO VOLUME label (what Explorer shows when the ISO is mounted).
                      Max 32 chars (UDF).
@@ -54,6 +65,15 @@
                      30-40 GB working set. The defaults below already crowd D:. Lower them, or
                      point ArchiveRoot at a bigger volume. Minimum 1 (0 would prune the ISO you
                      just built).
+
+    TrimByDefault    $true  => when the caller passes NEITHER -TrimMedia nor -NoTrim, the
+                     output install.wim is TRIMMED to just the selected editions (the sane
+                     default whenever DefaultEditions is a subset - a mixed-build ISO is not a
+                     valid repair source and almost never what you want).
+                     $false => full media unless -TrimMedia is passed.
+                     Override per run: -TrimMedia forces trim, -NoTrim forces full media.
+                     Leave $false for a profile whose DefaultEditions is $null (all editions) -
+                     trimming "all" just re-exports everything for no benefit.
 
     DefaultEditions  Which editions to patch when the caller names none (this is what the
                      scheduled task does). SEE docs/EDITIONS.md BEFORE EDITING.
@@ -98,6 +118,16 @@
 
 @{
 
+    # Ordered list of products the scheduled task (Invoke-MediaJobs.ps1) builds, in order.
+    # Trim this to limit unattended builds to the media you actually need.
+    RunMediaJobs = @(
+        'Server2025'
+        'Win11-25H2'
+        'Win11-24H2'
+    )
+
+    Products = @{
+
     'Server2025' = @{
         Label           = 'SERVER2025_PATCHED'
         IsoPrefix       = 'Server2025_Patched'   # LOAD-BEARING - see note above
@@ -109,6 +139,7 @@
         # $null = all 4 editions. The scheduled task relies on this, and so does the repair
         # runbook (this install.wim is the RestoreHealth source). Do not subset it.
         DefaultEditions = $null
+        TrimByDefault   = $false                 # all editions -> nothing to trim
 
         PreferRegex     = 'server operating system'
         LcuQuery        = 'Cumulative Update Microsoft server operating system version 24H2 x64'
@@ -136,6 +167,7 @@
             'Windows 11 Pro'                    # index 5
             'Windows 11 Pro for Workstations'   # index 9
         )
+        TrimByDefault   = $true                  # subset -> trim to just these three
 
         PreferRegex     = $null
         LcuQuery        = 'Cumulative Update for Windows 11 version 25H2 x64'
@@ -161,6 +193,7 @@
             'Windows 11 Pro'                    # index 5
             'Windows 11 Pro for Workstations'   # index 9
         )
+        TrimByDefault   = $true                  # subset -> trim to just these three
 
         PreferRegex     = $null
         LcuQuery        = 'Cumulative Update for Windows 11 version 24H2 x64'
@@ -173,4 +206,5 @@
         DotNetInclude   = 'Cumulative Update for \.NET Framework .*Windows 11,? version 24H2'
     }
 
+    }   # end Products
 }

@@ -15,7 +15,7 @@ component stores current and healthy:
 - **`Watch-Server2025Updates.ps1`** — daily detector that polls the Catalog and launches the
   slipstream only when a newer LCU actually publishes (idempotent; handles out-of-band).
 
-Version **3.2.0** — see [CHANGELOG.md](CHANGELOG.md).
+Version **3.4.0** — see [CHANGELOG.md](CHANGELOG.md).
 
 > **Paths:** all build-host defaults live on a **data volume (`D:`)** — RTM ISO in
 > `D:\Server2025RTM`, working/output in `D:\Server2025Patching`, ISO archive in
@@ -49,19 +49,21 @@ server2025-servicing/
 ├── CHANGELOG.md
 ├── .gitignore                       # excludes ISOs, WIMs, .msu/.cab, logs, scratch
 ├── config/
-│   └── Products.psd1                # PRODUCT PROFILES - the only file you should need to edit
+│   └── Products.psd1                # PRODUCT PROFILES + RunMediaJobs - the only file you should need to edit
 ├── scripts/
 │   ├── Slipstream-WindowsMedia.ps1  # build patched ISO (Server 2025 / Win11; edition subset + trim)
+│   ├── Invoke-MediaJobs.ps1         # build every product in RunMediaJobs, in order (scheduled entry point)
+│   ├── ISO_Inventory.ps1            # read-only: report editions + archive contents for all sources
 │   ├── Repair-Server2025Store.ps1   # repair a live host's store (+WinRE)
 │   ├── Check-Packages.ps1           # verify a WIM has needed payloads pre-repair
-│   └── Watch-Server2025Updates.ps1  # daily detector -> triggers build on new LCU
+│   └── Watch-Server2025Updates.ps1  # (legacy) Server-only daily detector
 ├── docs/
 │   ├── EDITIONS.md                  # DefaultEditions + the selection resolver (READ BEFORE EDITING config/)
 │   ├── RUNBOOK.md                   # step-by-step operational procedures
 │   ├── LESSONS-LEARNED.md           # the non-obvious gotchas, with fixes
 │   └── INCIDENT-csFiles.md          # the real case this tooling was hardened against
 └── scheduled-task/
-    └── Register-SlipstreamSchedule.ps1  # registers the daily detector + archive
+    └── Register-SlipstreamSchedule.ps1  # registers the daily Invoke-MediaJobs task
 ```
 
 > **Do not commit media.** `.gitignore` excludes `*.iso`, `*.wim`, `*.msu`, `*.cab`, logs,
@@ -91,11 +93,12 @@ if a prior run already serviced `install.wim`; add `-Fresh` to force a clean reb
 
 ```powershell
 # ALWAYS look first - never start a multi-hour build blind:
-.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -ListEditions
-.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -TrimMedia -DryRun
+.\scripts\ISO_Inventory.ps1 -Product Win11-25H2      # editions + what the default build patches
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -DryRun
 
-# then build (defaults from the product profile: Enterprise, Pro, Pro for Workstations)
-.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2 -TrimMedia
+# then build. The Win11 profiles set TrimByDefault, so a bare command TRIMS to the profile's
+# three editions (Enterprise, Pro, Pro for Workstations). Pass -NoTrim for full mixed-build media.
+.\scripts\Slipstream-WindowsMedia.ps1 -Product Win11-25H2
 ```
 
 Output: `D:\Win11_25H2_Patching\Win11_25H2_Patched_<stamp>.iso`.
@@ -133,6 +136,20 @@ so it correctly drops *Windows 11 Pro **N** for Workstations* without touching
 Then, if WinRE needs re-enabling: add `-EnableWinRE -SkipSfc`. See
 [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full decision tree, including the RTM-source
 fallback for orphaned component versions.
+
+## What to build, and when
+
+**Which media builds unattended** is the `RunMediaJobs` list at the top of
+[`config/Products.psd1`](config/Products.psd1) — an ordered list like
+`@('Server2025','Win11-25H2')`. The daily task runs
+[`Invoke-MediaJobs.ps1`](scripts/Invoke-MediaJobs.ps1), which builds each in turn; each product
+is a fast no-op unless its LCU is new. Drop a product from the list to stop building it (the
+profile stays for manual runs). Register the task with
+[`scheduled-task/Register-SlipstreamSchedule.ps1`](scheduled-task/Register-SlipstreamSchedule.ps1).
+
+**See what's there before you build:** `.\scripts\ISO_Inventory.ps1` mounts each source ISO
+read-only and reports its editions (with PATCH markers and the trimmed index map) plus the
+current archive contents — no ADK required.
 
 ## Update detection & cadence
 

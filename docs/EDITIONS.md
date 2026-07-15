@@ -160,8 +160,24 @@ These are **two independent decisions**, and conflating them is the most common 
 | selection only | **all** editions | shipped **UNPATCHED** (still RTM) |
 | selection + `-TrimMedia` | **only** the selected editions | not shipped at all |
 
-Without `-TrimMedia` you get **mixed-build media** — some editions patched, some at RTM, in one
+Without trimming you get **mixed-build media** — some editions patched, some at RTM, in one
 ISO. The script warns about this loudly. It is occasionally what you want; usually it is not.
+
+**`TrimByDefault` decides when you don't.** Because a subset build almost always wants trimmed
+output, each profile carries a `TrimByDefault` flag. When you pass **neither** `-TrimMedia` nor
+`-NoTrim`, that flag decides. The Win11 profiles set it `$true`; `Server2025` sets it `$false`
+(its `DefaultEditions` is `$null` = all editions, so there is nothing to trim). Effective trim:
+
+```
+-TrimMedia   -> trim        (explicit, wins)
+-NoTrim      -> full media  (explicit, wins)
+neither      -> the profile's TrimByDefault
+```
+
+This is why the July build that omitted `-TrimMedia` still needs the switch *removed only if you
+want full media* — with `TrimByDefault = $true`, a bare `-Product Win11-25H2` now trims by
+default. The startup banner prints `Trim media : YES/no` so you can see the decision before the
+build commits to it.
 
 `-TrimMedia` **renumbers** the surviving editions (3, 5, 9 → 1, 2, 3). Anything that picks an
 edition **by index** must be updated: `autounattend.xml` (`/IMAGE/INDEX`), MDT/SCCM task

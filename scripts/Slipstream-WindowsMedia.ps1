@@ -31,7 +31,7 @@
         https://learn.microsoft.com/windows/deployment/update/catalog-checkpoint-cumulative-updates
 
 .NOTES
-    Version    : 3.3.0   (slipstream archives + prunes; ArchiveRoot/KeepLast in config)
+    Version    : 3.4.1   (fix: Get-TS defined before use)
     Project    : server2025-servicing
     License    : MIT
     Run from an elevated Windows PowerShell 5.1+ prompt on a machine that has the
@@ -129,7 +129,11 @@ param(
     # Output install.wim contains ONLY the selected editions (smaller ISO). Indexes are
     # renumbered 1..N in the output; the old->new mapping is logged.
     # WITHOUT this switch, unselected editions are carried over UNPATCHED (mixed-build wim).
+    # If NEITHER -TrimMedia nor -NoTrim is given, the profile's TrimByDefault decides.
     [switch]$TrimMedia,
+
+    # Force NO trim even when the profile's TrimByDefault is $true (emit full mixed-build media).
+    [switch]$NoTrim,
 
     # Set $true to keep the expanded \newMedia folder after the ISO is built
     [switch]$KeepNewMedia,
@@ -148,6 +152,12 @@ param(
     # SYSTEM on a host whose SYSTEM WinINET hive (HKU\S-1-5-18) has a stale proxy configured.
     [switch]$NoProxy
 )
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
+$ScriptVersion          = '3.4.1'
+function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
+
 
 # ===========================================================================
 #  Product profiles - the ONLY place Catalog naming lives.
@@ -184,10 +194,14 @@ if (-not (Test-Path $ConfigPath)) {
     throw "Product config not found: $ConfigPath`nThis file defines every product profile. Restore it from the repo, or pass -ConfigPath."
 }
 try {
-    $PRODUCTS = Import-PowerShellDataFile -Path $ConfigPath -ErrorAction Stop
+    $CONFIG = Import-PowerShellDataFile -Path $ConfigPath -ErrorAction Stop
 } catch {
     throw "Product config is not valid PowerShell data: $ConfigPath`n$($_.Exception.Message)`nIt must contain ONE hashtable of literals. No commands, no variables, no expressions."
 }
+# Schema: current is @{ RunMediaJobs=@(...); Products=@{...} }. The older FLAT schema was just
+# @{ 'Server2025'=@{...}; ... } - still accepted so a half-updated deploy fails loudly on a
+# missing field rather than mysteriously "no products".
+if ($CONFIG -and $CONFIG.ContainsKey('Products')) { $PRODUCTS = $CONFIG.Products } else { $PRODUCTS = $CONFIG }
 if (-not $PRODUCTS -or $PRODUCTS.Keys.Count -eq 0) { throw "Product config defines no products: $ConfigPath" }
 
 # Validate EVERY profile up front, not just the one being built. A broken profile is a
@@ -255,6 +269,25 @@ if ($KeepLast -eq 0) {
     $KeepLast = if ($P.ContainsKey('KeepLast') -and [int]$P.KeepLast -ge 1) { [int]$P.KeepLast } else { 12 }
 }
 
+# ---- Resolve the effective trim decision -------------------------------------
+# The whole point: when a profile pins a SUBSET of editions (DefaultEditions), the natural,
+# safe output is TRIMMED media - a mixed-build ISO (some editions patched, some RTM) is almost
+# never what you want, and is not a valid repair source. Forgetting -TrimMedia used to silently
+# produce that mixed-build ISO after a 4-hour run. Now the profile's TrimByDefault decides when
+# the caller is silent; the switches are explicit overrides.
+#   -TrimMedia  -> trim (wins)
+#   -NoTrim     -> do not trim (wins)
+#   neither     -> $P.TrimByDefault (default $false if the profile omits it)
+if ($TrimMedia -and $NoTrim) {
+    throw "Pass -TrimMedia OR -NoTrim, not both."
+}
+if ($NoTrim) {
+    $TrimMedia = $false
+} elseif (-not $TrimMedia) {
+    $TrimMedia = [bool]$P.TrimByDefault
+    if ($TrimMedia) { Write-Output "$(Get-TS): TrimByDefault is set for $Product - emitting TRIMMED media (pass -NoTrim to override)." }
+}
+
 # Explicit selection contract, built ONCE from the parameters and passed to
 # Resolve-EditionSelection. Keeps the resolver free of hidden script-scope dependencies.
 $SELECTION = @{
@@ -265,11 +298,6 @@ $SELECTION = @{
     AllEditions        = [bool]$AllEditions
     DefaultEditions    = $P.DefaultEditions
 }
-
-$ErrorActionPreference = 'Stop'
-$ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '3.3.0'
-function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # Retry a scriptblock a few times - the Microsoft Update Catalog frequently returns
 # transient "has encountered an error. Please try again later." responses.
@@ -424,10 +452,39 @@ foreach ($stale in @('install2.wim','boot2.wim','winre.wim','winre2.wim')) {
 
 Start-Transcript -Path (Join-Path $LOG_DIR "Slipstream_$stamp.log") -Append | Out-Null
 Write-Output "$(Get-TS): ===== Windows media slipstream (v$ScriptVersion) started ====="
+
+# ---- Reclaim orphaned mounts from an ABORTED prior run ------------------------
+# Ctrl+C (or a crash) kills the process WITHOUT running the cleanup trap, so a WIM stays
+# mounted read/write. The next run then dies at the first Mount-WindowsImage with
+# "already mounted for read/write access" (line ~1082). The in-process $MountedImagePaths list
+# cannot help - it belongs to the dead process. Ask DISM what is actually mounted and discard
+# anything mounted under THIS product's working tree. ALL our mounts (MainOS/WinRE/WinPE) live
+# under $WORKING, so that one test covers them - and, crucially, it never touches a mount from
+# a DIFFERENT product that happens to be running (its mounts are under a different $WORKING).
+# ($INSTALL_WIM/$BOOT_WIM are not defined this early, so we key on the mount path, not the wim.)
+try {
+    $ourMountRoot = $WORKING.ToLower().TrimEnd('\') + '\'
+    $orphans = @(Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object {
+        $_.MountPath -and ($_.MountPath.ToLower().TrimEnd('\') + '\').StartsWith($ourMountRoot)
+    })
+    foreach ($o in $orphans) {
+        Write-Warning "$(Get-TS): Reclaiming orphaned mount from a prior run: $($o.MountPath) (image $($o.ImagePath), index $($o.ImageIndex))"
+        try { Dismount-WindowsImage -Path $o.MountPath -Discard -ErrorAction Stop | Out-Null }
+        catch { Write-Warning "$(Get-TS): Discard of $($o.MountPath) failed: $($_.Exception.Message)" }
+    }
+    if ($orphans.Count -gt 0) {
+        Clear-WindowsCorruptMountPoint | Out-Null
+        Write-Output "$(Get-TS): Reclaimed $($orphans.Count) orphaned mount(s); continuing."
+    }
+} catch {
+    Write-Warning "$(Get-TS): Orphaned-mount check failed ($($_.Exception.Message)); continuing. If a mount is stuck, run: Get-WindowsImage -Mounted / Dismount-WindowsImage -Path <dir> -Discard / Clear-WindowsCorruptMountPoint."
+}
+
 Write-Output "$(Get-TS): Product    : $Product"
 Write-Output "$(Get-TS): Source ISO : $SourceISO"
 Write-Output "$(Get-TS): Base path  : $BasePath"
 Write-Output "$(Get-TS): Archive    : $(if ($ArchiveRoot) { "$ArchiveRoot  (keep last $KeepLast)" } else { '(none - ISO stays in Base path)' })"
+Write-Output "$(Get-TS): Trim media : $(if ($TrimMedia) { 'YES (output = selected editions only)' } else { 'no (full media; unselected editions stay RTM)' })"
 Write-Output "$(Get-TS): Output ISO : $OUTPUT_ISO"
 
 # Track mounted images / ISOs so the cleanup trap can always tidy up.

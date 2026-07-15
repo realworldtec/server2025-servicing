@@ -1,122 +1,103 @@
 <#
 .SYNOPSIS
-    Registers the DAILY Server 2025 update detector (Watch-Server2025Updates.ps1) as a
-    scheduled task. The detector polls the Microsoft Update Catalog and only launches the
-    (slow) slipstream when a build newer than the last one built appears - so the patched
-    ISO is produced the day the CU actually publishes, including out-of-band releases.
+    Registers the daily media-build task. The task runs Invoke-MediaJobs.ps1, which builds each
+    product listed in config\Products.psd1's RunMediaJobs, in order. Each build is a fast no-op
+    on days with nothing new (the slipstream's own ALREADY-BUILT guard), and archives itself
+    per that product's ArchiveRoot/KeepLast.
 
 .DESCRIPTION
-    This replaces the earlier fixed "2nd Wednesday" trigger. The task runs the detector once
-    a day at -Time; the detector is a fast no-op on days with nothing new. Archive + retention
-    are handled by the detector.
+    Everything that used to be a parameter here - which products, where to archive, how many to
+    keep, the source ISO - now lives in config\Products.psd1, so this registrar only needs to
+    know WHEN to run and AS WHOM. Change what gets built by editing RunMediaJobs in the config;
+    no re-registration required.
 
-    Idempotent: re-run to update the task (-Force).
+    Idempotent: re-run to update the task (-Force is implied).
 
-.PARAMETER ShareRoot
-    Folder to archive finished ISOs to (passed to the detector). Default D:\PatchedImages.
-    A LOCAL folder is simplest - share it out afterwards if needed. If you point this at a
-    UNC, note the task runs as SYSTEM and hits the share as the machine account: either grant
-    DOMAIN\HOST$ access or use -RunAsUser. Size for KeepLast x ~8.6 GB.
+.PARAMETER ConfigPath
+    Product config the task will read. Default ..\config\Products.psd1.
 
-.PARAMETER WatchScript
-    Path to Watch-Server2025Updates.ps1. Default: ..\scripts\Watch-Server2025Updates.ps1.
-
-.PARAMETER SlipstreamScript
-    Path to Slipstream-WindowsMedia.ps1. Default: ..\scripts\Slipstream-WindowsMedia.ps1.
-
-.PARAMETER OutputDir
-    Slipstream working + output dir. Default D:\Server2025Patching (needs ~30-40 GB free).
-
-.PARAMETER StateFile
-    Detector state marker. Default <OutputDir>\state\last-built.json.
-
-.PARAMETER KeepLast
-    Archived ISOs to retain on the share. Default 12.
+.PARAMETER JobRunner
+    Path to Invoke-MediaJobs.ps1. Default ..\scripts\Invoke-MediaJobs.ps1.
 
 .PARAMETER Time
     Daily run time (local). Default 02:00.
 
-.PARAMETER MonthlyOnly
-    Register the detector with -MonthlyOnly (build only for the 2nd-Tuesday security LCU).
+.PARAMETER NoProxy
+    Register the task with -NoProxy (forces a direct connection; use when running as SYSTEM on a
+    host whose SYSTEM WinINET hive has a stale proxy).
 
 .PARAMETER RunAsUser
-    'SYSTEM' (default) or a domain account (prompts for password) if the share needs auth.
+    'SYSTEM' (default) or a domain account (prompts for a password). Note: as SYSTEM, a UNC
+    ArchiveRoot is hit as the MACHINE account (DOMAIN\HOST$).
+
+.PARAMETER ExecutionTimeLimitHours
+    Task execution time limit. Default 20 (several products x multi-hour builds, back to back).
 
 .PARAMETER TaskName
-    Default 'Server2025-Update-Watch'.
+    Default 'Server2025-Servicing-MediaJobs'.
 
 .EXAMPLE
-    # All defaults (D:\ data volume): archive D:\PatchedImages, work D:\Server2025Patching
     .\Register-SlipstreamSchedule.ps1
-
 .EXAMPLE
-    .\Register-SlipstreamSchedule.ps1 -ShareRoot 'D:\PatchedImages' -KeepLast 6 -MonthlyOnly
+    .\Register-SlipstreamSchedule.ps1 -Time 01:30 -NoProxy
 
 .NOTES
-    Version : 1.2.0
+    Version : 2.0.0
     Project : server2025-servicing
     License : MIT
-    Run elevated on the decoupled management/build host (must have ADK + WinPE).
+    Run elevated on the management/build host (ADK + WinPE).
+
+    Replaces v1.x, which scheduled the Server-only detector (Watch-Server2025Updates.ps1). If
+    you registered that under its old name, remove it:
+        Unregister-ScheduledTask -TaskName 'Server2025-Update-Watch' -Confirm:$false
 #>
 
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [string]$ShareRoot = 'D:\PatchedImages',
-    [string]$WatchScript,
-    [string]$SlipstreamScript,
-    [string]$OutputDir = 'D:\Server2025Patching',
-    [string]$SourceISO = '',   # empty => let the slipstream's per-product default apply
-    [string]$StateFile,
-    [ValidateRange(1,999)][int]$KeepLast     = 12,
+    [string]$ConfigPath,
+    [string]$JobRunner,
     [string]$Time      = '02:00',
-    [switch]$MonthlyOnly,
     [switch]$NoProxy,
     [string]$RunAsUser = 'SYSTEM',
-    [string]$TaskName  = 'Server2025-Update-Watch'
+    [int]$ExecutionTimeLimitHours = 20,
+    [string]$TaskName  = 'Server2025-Servicing-MediaJobs'
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.3.0'
-$here = $PSScriptRoot
-$repo = Split-Path $here -Parent
+$ScriptVersion = '2.0.0'
+$repo = Split-Path $PSScriptRoot -Parent
 
-if (-not $WatchScript)      { $WatchScript      = Join-Path $repo 'scripts\Watch-Server2025Updates.ps1' }
-if (-not $SlipstreamScript) { $SlipstreamScript = Join-Path $repo 'scripts\Slipstream-WindowsMedia.ps1' }
-if (-not $StateFile)        { $StateFile        = Join-Path $OutputDir 'state\last-built.json' }
-foreach ($p in @($WatchScript,$SlipstreamScript)) { if (-not (Test-Path $p)) { throw "Script not found: $p" } }
-if (-not (Test-Path $ShareRoot)) { Write-Warning "ShareRoot not reachable right now: $ShareRoot (task still registered; verify access under the run-as account)." }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $repo 'config\Products.psd1' }
+if (-not $JobRunner)  { $JobRunner  = Join-Path $repo 'scripts\Invoke-MediaJobs.ps1' }
+foreach ($p in @($ConfigPath,$JobRunner)) { if (-not (Test-Path $p)) { throw "Not found: $p" } }
 
-# The RTM ISO must exist on THIS host - the slipstream reads it every build.
-if ($SourceISO) {
-    if (-not (Test-Path $SourceISO)) { throw "SourceISO not found: $SourceISO" }
-} else {
-    Write-Warning "No -SourceISO given; the slipstream will use its built-in default path. Verify the RTM ISO exists there on this host, or re-register with -SourceISO."
+# Trailing backslashes first: CommandLineToArgvW reads \" as an escaped quote, so a path
+# ending in \ would swallow the rest of the command line. (Real class of bug.)
+foreach ($v in 'ConfigPath','JobRunner') {
+    $cur = Get-Variable -Name $v -ValueOnly
+    if ($cur) { Set-Variable -Name $v -Value $cur.TrimEnd('\') }
 }
 
-# --- Build the detector command line the task will run -------------------------
-# Strip trailing backslashes FIRST. A perfectly ordinary -ShareRoot 'D:\PatchedImages\' would
-# otherwise emit  -ShareRoot "D:\PatchedImages\"  and CommandLineToArgvW treats the \" as an
-# escaped quote: the quoted region never closes, ShareRoot swallows the rest of the command
-# line, and the task silently misbehaves at 02:00.
-foreach ($v in 'ShareRoot','OutputDir','StateFile','SourceISO','WatchScript','SlipstreamScript') {
-    $cur = Get-Variable -Name $v -ValueOnly -ErrorAction SilentlyContinue
-    if ($cur -is [string] -and $cur) { Set-Variable -Name $v -Value $cur.TrimEnd('\') }
-}
+# Report what will actually run, so registration doubles as a config sanity check.
+try { $CONFIG = Import-PowerShellDataFile -Path $ConfigPath -ErrorAction Stop }
+catch { throw "Product config is not valid PowerShell data: $ConfigPath`n$($_.Exception.Message)" }
+$products = if ($CONFIG -and $CONFIG.ContainsKey('Products')) { $CONFIG.Products } else { $CONFIG }
+$jobList  = if ($CONFIG -and $CONFIG.ContainsKey('RunMediaJobs')) { @($CONFIG.RunMediaJobs) } else { @() }
+if ($jobList.Count -eq 0) { throw "config has no RunMediaJobs list - nothing would be built. Add one to $ConfigPath." }
+$badJobs = @($jobList | Where-Object { -not ($products -and $products.ContainsKey($_)) })
+if ($badJobs.Count -gt 0) { throw "RunMediaJobs names an undefined product: $($badJobs -join ', ')." }
 
-$arg = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -SlipstreamScript "{1}" -OutputDir "{2}" -StateFile "{3}" -KeepLast {4} -ShareRoot "{5}"' -f `
-        $WatchScript, $SlipstreamScript, $OutputDir, $StateFile, $KeepLast, $ShareRoot
-if ($SourceISO)   { $arg += ' -SourceISO "{0}"' -f $SourceISO }
-if ($MonthlyOnly) { $arg += ' -MonthlyOnly' }
-if ($NoProxy)     { $arg += ' -NoProxy' }   # forces direct; also passed through to the slipstream
+$arg = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $JobRunner, $ConfigPath
+if ($NoProxy) { $arg += ' -NoProxy' }
 
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
               -MultipleInstances IgnoreNew `
-              -ExecutionTimeLimit (New-TimeSpan -Hours 10) `
+              -ExecutionTimeLimit (New-TimeSpan -Hours $ExecutionTimeLimitHours) `
               -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$desc = "Daily Server 2025 update detector; builds patched ISO when a new LCU publishes. server2025-servicing v$ScriptVersion."
+$desc = "Daily media build (RunMediaJobs from config). server2025-servicing v$ScriptVersion."
 
 $common = @{ TaskName = $TaskName; Action = $action; Trigger = $trigger; Settings = $settings; Description = $desc; RunLevel = 'Highest'; Force = $true }
 if ($RunAsUser -match '^(NT AUTHORITY\\)?SYSTEM$') {
@@ -126,11 +107,11 @@ if ($RunAsUser -match '^(NT AUTHORITY\\)?SYSTEM$') {
     Register-ScheduledTask @common -User $cred.UserName -Password $cred.GetNetworkCredential().Password | Out-Null
 }
 
-Write-Host "Registered '$TaskName' (daily $Time, run-as $RunAsUser, MonthlyOnly=$MonthlyOnly)."
-Write-Host "Detector : $WatchScript"
-Write-Host "Archive  : $ShareRoot  (retention: keep $KeepLast)"
-Write-Host "State    : $StateFile"
+Write-Host "Registered '$TaskName' (daily $Time, run-as $RunAsUser)."
+Write-Host "Runner : $JobRunner"
+Write-Host "Config : $ConfigPath"
+Write-Host "Jobs   : $($jobList -join ' -> ')"
 Write-Host ""
-Write-Host "Dry-run the detector now (no build unless a new LCU is out):"
-Write-Host "  Start-ScheduledTask -TaskName '$TaskName'    # then watch $OutputDir\logs\Watch_*.log"
-Write-Host "Force a one-off build regardless of state: delete $StateFile, or run Slipstream-WindowsMedia.ps1 directly."
+Write-Host "Dry-run now (each product no-ops unless its LCU is new):"
+Write-Host "  Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Change what gets built by editing RunMediaJobs in $ConfigPath (no re-registration needed)."

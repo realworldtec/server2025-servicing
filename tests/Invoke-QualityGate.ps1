@@ -40,6 +40,9 @@
         applied explicitly; naming the folder applies them explicitly and fails 0x80070228.
         Microsoft: "run DISM /add-package with the latest .msu file as the sole target".
         (Real bug: killed a 25H2 build 30 minutes in.) $*_PATH vars are FILES and are fine.
+      * A script-local function CALLED (at top level) before it is DEFINED. PowerShell runs
+        top-to-bottom, so this throws "not recognized" at runtime - invisible to AST parse and
+        PSSA. (Real bug: Get-TS used above its definition after a v3.4.0 code move.)
 
 .PARAMETER Path
     Repo root to scan. Defaults to the parent of this script.
@@ -53,7 +56,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.4.0
+    Version : 1.5.1
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -313,10 +316,47 @@ foreach ($f in $files) {
             }
         }
     }
+
+    # --- Rule F: script-local function CALLED before it is DEFINED -----------------
+    # PowerShell executes top-to-bottom, so a call to a function above its `function` line
+    # throws at RUNTIME: "The term 'X' is not recognized". The AST parses fine and PSSA is
+    # silent, so this sailed past a green gate and died on first run (Get-TS, used by a block
+    # that had been moved above its definition). Precise + cheap: collect every local function's
+    # definition offset, then flag any CALL to one of those names at an earlier offset.
+    $funcDefs = @{}
+    foreach ($fn in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))) {
+        # First definition wins (a function can legitimately be redefined later).
+        if (-not $funcDefs.ContainsKey($fn.Name)) { $funcDefs[$fn.Name] = $fn.Extent.StartOffset }
+    }
+    if ($funcDefs.Count -gt 0) {
+        foreach ($call in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
+            $cn = $call.GetCommandName()
+            if (-not ($cn -and $funcDefs.ContainsKey($cn) -and ($call.Extent.StartOffset -lt $funcDefs[$cn]))) { continue }
+
+            # ONLY top-level calls matter. A call NESTED inside a function body is deferred until
+            # that function is invoked - by which point all later definitions have loaded - so a
+            # forward reference between functions (A calls B, B defined below A) is legal and must
+            # NOT be flagged. Walk ancestors: if any is a function definition, skip.
+            $nested = $false
+            $anc = $call.Parent
+            while ($anc) {
+                if ($anc -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $nested = $true; break }
+                $anc = $anc.Parent
+            }
+            if ($nested) { continue }
+
+            $rulesFindings++
+            Write-Host ("  FAIL  {0}:{1}  '{2}' is CALLED (at top level) before it is defined." -f `
+                $f.Name, $call.Extent.StartLineNumber, $cn) -ForegroundColor Red
+            Write-Host "        PowerShell runs top-to-bottom: this throws 'not recognized' at runtime." -ForegroundColor Red
+            Write-Host "        Move the function definition above its first use." -ForegroundColor Red
+            $failures++
+        }
+    }
 }
 
 if ($rulesFindings -eq 0) {
-    Write-Host ("  ok    no findings ({0} script(s) scanned; rules A-E)" -f $rulesScanned) -ForegroundColor Green
+    Write-Host ("  ok    no findings ({0} script(s) scanned; rules A-F)" -f $rulesScanned) -ForegroundColor Green
 } else {
     Write-Host ("  {0} finding(s) across {1} script(s)." -f $rulesFindings, $rulesScanned) -ForegroundColor Yellow
 }
@@ -333,14 +373,28 @@ if (-not (Test-Path $cfg)) {
     Write-Host "  FAIL  config\Products.psd1 not found - the slipstream cannot run without it." -ForegroundColor Red
     $failures++
 } else {
-    $cfgProducts = $null
+    $cfgRoot = $null
     try {
-        $cfgProducts = Import-PowerShellDataFile -Path $cfg -ErrorAction Stop
+        $cfgRoot = Import-PowerShellDataFile -Path $cfg -ErrorAction Stop
     } catch {
         Write-Host ("  FAIL  config\Products.psd1 is not valid PowerShell data: {0}" -f $_.Exception.Message) -ForegroundColor Red
         Write-Host "        It must be ONE hashtable of literals - no commands, variables or expressions." -ForegroundColor Red
         $failures++
     }
+    # Schema: nested (@{ RunMediaJobs=...; Products=@{...} }) or legacy flat (@{ 'Server2025'=... }).
+    $cfgProducts = if ($cfgRoot -and $cfgRoot.ContainsKey('Products')) { $cfgRoot.Products } else { $cfgRoot }
+
+    # RunMediaJobs (nested schema only): every name listed must be a defined product, or the
+    # scheduled task would try to build a product that does not exist.
+    if ($cfgRoot -and $cfgRoot.ContainsKey('RunMediaJobs')) {
+        foreach ($j in @($cfgRoot['RunMediaJobs'])) {
+            if (-not ($cfgProducts -and $cfgProducts.ContainsKey($j))) {
+                $failures++
+                Write-Host ("  FAIL  RunMediaJobs lists '{0}', which is not a defined product." -f $j) -ForegroundColor Red
+            }
+        }
+    }
+
     if ($cfgProducts) {
         $required = @('Label','IsoPrefix','BasePath','SourceISO','LcuQuery','LcuInclude',
                       'SafeOsQuery','SafeOsInclude','SetupQuery','SetupInclude',
@@ -367,6 +421,11 @@ if (-not (Test-Path $cfg)) {
                         if ("$e" -match '[\*\?]') { $errs += "DefaultEditions '$e' contains a wildcard (matched with -eq => matches NOTHING)" }
                     }
                 }
+                # TrimByDefault, if present, must be a real boolean - 'yes'/'true' as a STRING is
+                # truthy in a way that would silently trim when the operator did not mean to.
+                if ($prof.ContainsKey('TrimByDefault') -and $prof['TrimByDefault'] -isnot [bool]) {
+                    $errs += "TrimByDefault must be `$true or `$false (got a $($prof['TrimByDefault'].GetType().Name))"
+                }
             }
             if ($errs.Count -gt 0) {
                 $bad++
@@ -374,7 +433,8 @@ if (-not (Test-Path $cfg)) {
             } else {
                 $def = if ($null -eq $prof['DefaultEditions']) { 'ALL editions' } else { "$(@($prof['DefaultEditions']).Count) edition(s)" }
                 $arc = if ([string]::IsNullOrWhiteSpace([string]$prof['ArchiveRoot'])) { 'no archive' } else { "-> $($prof['ArchiveRoot']) keep $($prof['KeepLast'])" }
-                Write-Host ("  ok    {0,-12} {1}_<stamp>.iso  ({2}; {3})" -f $name, $prof['IsoPrefix'], $def, $arc) -ForegroundColor Green
+                $trm = if ([bool]$prof['TrimByDefault']) { 'trim' } else { 'full' }
+                Write-Host ("  ok    {0,-12} {1}_<stamp>.iso  ({2}, {3}; {4})" -f $name, $prof['IsoPrefix'], $def, $trm, $arc) -ForegroundColor Green
             }
         }
         if ($bad -gt 0) { $failures++ }
