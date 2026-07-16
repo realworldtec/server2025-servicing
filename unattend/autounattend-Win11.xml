@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  autounattend-Win11.xml  -  unattended Windows 11 install for an ESXi VM with NO vTPM.
+
+  WHAT IT DOES
+    * windowsPE pass: writes the LabConfig bypass keys BEFORE Setup runs its compatibility
+      check, so Setup does NOT stop on "This PC can't run Windows 11" (no TPM 2.0, no Secure
+      Boot, insufficient RAM). This is the same bypass Rufus applies to USB media.
+    * Wipes disk 0 and lays down a clean UEFI/GPT layout (EFI + MSR + Windows).
+    * Installs the edition selected BY NAME (default: Windows 11 Pro) - name, not index,
+      so this file keeps working whether the media is trimmed (renumbered) or full.
+    * Skips OOBE: no Microsoft account, no "let's connect you to a network" - creates a LOCAL
+      administrator instead.
+
+  WHAT IT DOES NOT DO
+    * It does NOT debloat. Do that AFTER install with Winhance (post-install GUI) or bake it in
+      with UnattendedWinstall's generator. Keeping debloat out of here keeps this file small,
+      auditable, and safe to reuse. See docs/UNATTEND-Win11-ESXi.md.
+    * It cannot add missing CPU instructions (POPCNT / SSE4.2). Not a concern on ESXi 8 - any
+      host CPU that runs ESXi 8 has them.
+
+  HARD RULES BEFORE YOU USE IT
+    1. It WIPES DISK 0 with no prompt. Only attach it to a VM you intend to install fresh.
+    2. Change the local Administrator password below (search: CHANGE-ME).
+    3. Set your TimeZone (search: TimeZone) - the value must be a valid Windows TZ id.
+    4. UEFI firmware only. In the ESXi VM options set Boot Firmware = EFI (Win11 requires it).
+
+  HOW SETUP FINDS THIS FILE
+    Windows Setup auto-reads "autounattend.xml" from the ROOT of any attached removable/optical
+    media. Simplest: put this file on a tiny second ISO and attach it as a 2nd CD-ROM. See the
+    doc for the one-line oscdimg command. (Do NOT bake it into your golden patched ISO - that
+    would wipe disk 0 on every use of that media.)
+
+  Verified against the bypass method current for Windows 11 24H2 / 25H2 (July 2026).
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <!-- ============================================================= -->
+  <!--  windowsPE : bypass checks, wipe + partition, choose edition  -->
+  <!-- ============================================================= -->
+  <settings pass="windowsPE">
+
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <SetupUILanguage>
+        <UILanguage>en-US</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+      <!-- The bypass. These keys are read by Setup's compatibility gate; setting them here,
+           first, is what lets a no-vTPM ESXi VM install Windows 11 at all. -->
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add "HKLM\SYSTEM\Setup\LabConfig" /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg add "HKLM\SYSTEM\Setup\LabConfig" /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>reg add "HKLM\SYSTEM\Setup\LabConfig" /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>reg add "HKLM\SYSTEM\Setup\LabConfig" /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Path>reg add "HKLM\SYSTEM\Setup\LabConfig" /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <!-- Belt-and-braces for the in-place-upgrade path; harmless on a clean install. -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>6</Order>
+          <Path>reg add "HKLM\SYSTEM\Setup\MoSetup" /v AllowUpgradesWithUnsupportedTPMOrCPU /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+
+      <!-- Clean UEFI/GPT layout on disk 0. WIPES THE DISK. -->
+      <DiskConfiguration>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <!-- EFI System Partition -->
+            <CreatePartition wcm:action="add">
+              <Order>1</Order>
+              <Type>EFI</Type>
+              <Size>260</Size>
+            </CreatePartition>
+            <!-- Microsoft Reserved (MSR) -->
+            <CreatePartition wcm:action="add">
+              <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>16</Size>
+            </CreatePartition>
+            <!-- Windows - takes the rest of the disk -->
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
+              <Type>Primary</Type>
+              <Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order>
+              <PartitionID>1</PartitionID>
+              <Format>FAT32</Format>
+              <Label>System</Label>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order>
+              <PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order>
+              <PartitionID>3</PartitionID>
+              <Format>NTFS</Format>
+              <Label>Windows</Label>
+              <Letter>C</Letter>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <!-- Select the edition BY NAME so trimming/renumbering the media cannot pick the
+               wrong one. Must match an ImageName in the media's install.wim exactly. A single-
+               edition deploy ISO from New-DeployableIso.ps1 contains only "Windows 11 Pro";
+               the full trimmed 25H2 media also has "Windows 11 Enterprise" and
+               "Windows 11 Pro for Workstations". Confirm with ISO_Inventory.ps1.
+               IMPORTANT: keep this and the ProductKey below on the SAME edition - a mismatched
+               key can trigger an edition switch during Setup. -->
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/NAME</Key>
+              <Value>Windows 11 Pro</Value>
+            </MetaData>
+          </InstallFrom>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <!-- KMS client setup key (GVLK) for Windows 11 PRO. These are Microsoft's PUBLIC generic
+             keys: they select the edition and suppress the key prompt during Setup, but they do
+             NOT activate. Activation happens afterward against your KMS host (or Active Directory-
+             Based Activation) - the installed OS shows "Windows is not activated" until it reaches
+             the KMS server, which is expected and correct.
+             MUST match /IMAGE/NAME above. Common Win11 GVLKs:
+               Pro                     W269N-WFGWX-YVC9B-4J6C9-T83GX
+               Pro for Workstations    NRG8B-VKK3Q-CXVCJ-9G2XF-6Q84J
+               Enterprise              NPPR9-FWDCX-D2C8J-H872K-2YT43
+               Education               NW6C2-QMPVW-D7KKK-3GKT6-VCFB2 -->
+        <ProductKey>
+          <Key>W269N-WFGWX-YVC9B-4J6C9-T83GX</Key>
+        </ProductKey>
+      </UserData>
+
+    </component>
+  </settings>
+
+  <!-- ============================================================= -->
+  <!--  specialize : machine name                                    -->
+  <!-- ============================================================= -->
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <!-- "*" = a random valid computer name. Set a fixed name if you prefer. -->
+      <ComputerName>*</ComputerName>
+
+      <!-- Run the privacy hardening HERE, in specialize, as SYSTEM, BEFORE OOBE/first logon.
+           This is the universal trigger: it needs no AutoLogon and works on machines with an OEM
+           key in firmware (the Acer), where SetupComplete.cmd would be SKIPPED. It is SELF-
+           GUARDING: if the hardening script isn't on the media (e.g. plain stock media + this
+           answer file), it is a no-op. New-DeployableIso.ps1 injects the script to that path. The
+           script's own marker makes it safe even if SetupComplete.cmd also runs it. -->
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>cmd /c (if exist C:\Windows\Setup\Scripts\Invoke-PrivacyHardening.ps1 (powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\Invoke-PrivacyHardening.ps1)) ^&amp; exit /b 0</Path>
+          <Description>Privacy hardening (self-guarding; SYSTEM; pre-OOBE)</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+
+  <!-- ============================================================= -->
+  <!--  oobeSystem : skip OOBE, create a LOCAL admin, set locale     -->
+  <!-- ============================================================= -->
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+        <!-- HideOnlineAccountScreens + a LocalAccount below is the reliable way to skip the
+             Microsoft-account / network gate on 24H2/25H2 (bypassnro.cmd was removed). Microsoft
+             keeps tightening OOBE, so if a future build still forces the network page, at that
+             screen press Shift+F10 and run: start ms-cxh:localonly -->
+      </OOBE>
+
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>Admin</Name>
+            <Group>Administrators</Group>
+            <DisplayName>Admin</DisplayName>
+            <!-- CHANGE-ME: set a real password. PlainText true stores it in clear in this file;
+                 that is fine for a throwaway lab file you keep private, not for anything shared. -->
+            <Password>
+              <Value>ChangeMe!2026</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+
+      <!-- TimeZone: MUST be a valid Windows time-zone id (run `tzutil /l` to list).
+           Examples: "Eastern Standard Time", "Central Standard Time", "UTC". -->
+      <TimeZone>Eastern Standard Time</TimeZone>
+
+      <!-- Optional: uncomment to auto-log in the local admin once, e.g. to run a post-install
+           script. Remove after first boot for security.
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <LogonCount>1</LogonCount>
+        <Username>Admin</Username>
+        <Password><Value>ChangeMe!2026</Value><PlainText>true</PlainText></Password>
+      </AutoLogon>
+      -->
+
+      <!-- Optional: light first-logon touches. Keep heavy debloat in Winhance instead.
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <CommandLine>powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c</CommandLine>
+          <Description>High performance power plan</Description>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+      -->
+
+    </component>
+  </settings>
+
+</unattend>

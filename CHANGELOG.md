@@ -6,7 +6,124 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
-- Nothing yet.
+### Added
+- **Privacy hardening (→ v1.4.0): second-pass hardening from the first ESXi boot test.** After
+  booting the v1.3.0 deploy ISO, the following gaps were closed. New toggles (all default on):
+  **`DisableSearchAccounts`** (Windows Search "find my content" across Microsoft + Work/School
+  accounts off — `IsMSACloudSearchEnabled`/`IsAADCloudSearchEnabled`), **`DisableStartRecommendations`**
+  (Start "Recommended" band + tips/shortcut recommendations off — `HideRecommendedSection` on the
+  Explorer policy *and* the PolicyManager device node so it sticks on Pro, plus per-user
+  `Start_IrisRecommendations`), **`ShowFullAppsList`** (Start All-apps as a flat list, not the
+  24H2/25H2 category grid — `HideCategoryView`), **`DisableProxyAutoDetect`** ("Automatically detect
+  settings"/WPAD off via `DisableWpad`, service kept running), **`EnableRemoteDesktop`** (RDP on +
+  firewall group + NLA required), **`SetNetworkPrivate`** (unidentified networks → Private via the
+  Network List Manager signature policy), and **`DisableCloudDeliveredProtection`** (MAPS/cloud
+  lookups + sample submission off — real-time scanning stays on; explicitly requested, reduces
+  protection). Strengthened existing sections: **Edge** now kills the MSN "Times Square" new-tab feed
+  (`NewTabPageContentEnabled=0` + hide default top sites); **Firefox** locks the stubborn sponsored
+  shortcuts via the `Preferences` policy (`showSponsoredTopSites`/`showSponsored`/contile off,
+  `Status:locked`); **inking** adds `TIPC`, contact-harvest and privacy-policy-accept off; **appx
+  debloat** now removes **already-installed** copies too (`Get-AppxPackage -AllUsers`, not just
+  provisioned) and adds LinkedIn/WhatsApp/Facebook/Instagram/Spotify/etc. to the remove list — the
+  KEEP guard still protects dev-critical packages. Doc adds a "fixing a box you've already deployed"
+  path (`-Force -AlsoCurrentUser`) and calls out the specialize-timing caveat that made appx/Defender
+  changes flaky on the first boot.
+- **Firefox baked into the deploy ISO, installed by a self-destructing run-once task.**
+  `New-DeployableIso.ps1` (→ v1.1.0) downloads the latest x64 offline Firefox installer on the
+  build host and injects it into the image at `C:\Windows\Setup\Files\FirefoxSetup.exe` (one mount
+  cycle, alongside the hardening). The hardening's **`InstallFirefox`** toggle (→ v1.3.0) does NOT
+  install at specialize (too early for app installers); it **registers a run-once first-logon
+  scheduled task** (`PrivacyHardening-InstallFirefox`, SYSTEM) that installs Firefox silently
+  (`/S`) from the local installer - **no network**, good for the Acer before wifi/USB-ethernet is
+  up - then removes the task and its own helper (self-destruct), logging to
+  `firefox_install.log`. Fires once, leaves nothing behind. `-FirefoxSetup <path>` uses a supplied
+  installer for offline build hosts; `-NoFirefox` skips baking; if absent at boot the task isn't
+  registered and the Mozilla policy still applies. The baked Firefox is refreshed every patch-cycle
+  rebuild, so it's never more than a cycle stale.
+- **Privacy hardening (→ v1.2.0): specialize-pass trigger, browser policy, Defender sample
+  submission, idempotency.** The answer file now runs the hardening from a **specialize
+  `RunSynchronousCommand`** (SYSTEM, before OOBE, no logon) - the universal trigger that needs no
+  AutoLogon and, unlike `SetupComplete.cmd`, is **not** skipped on machines with an OEM key in
+  firmware (the Acer). It's self-guarding (no-op if the script isn't on the media) and safe to have
+  alongside SetupComplete because the script now writes an **idempotency marker** and no-ops on
+  repeat (`-Force` overrides). New hardening categories: **`DisableDefenderSampleSubmission`**
+  (SubmitSamplesConsent = Never Send - keeps real-time + cloud protection ON), **`NeuterEdge`**
+  (background/telemetry/feedback/recommendations off; full removal is EEA-only), and
+  **`HardenFirefox`** (Mozilla enterprise policy via registry: telemetry/Pocket/Studies/sponsored
+  off, tracking protection on - LibreWolf-like, applies the moment Firefox is installed). Doc adds
+  a trigger comparison table, the Firefox install (winget) + default-browser-association guidance,
+  and confirms per-user tweaks target the Default hive so **all** users get the same treatment.
+
+- **`scripts/New-DeployableIso.ps1`** — remaster the **newest patched ISO** for a product into a
+  lean, single-edition **deploy** ISO (default: `Win11-25H2` → `Windows 11 Pro`) with the privacy
+  hardening **injected into the image** (`\Windows\Setup\Scripts`, so `SetupComplete.cmd` auto-runs).
+  Reuses the ~4-hour slipstream output (no re-servicing → minutes), selects the edition by name
+  (trim-safe), verifies the output holds exactly one edition, and archives beside the source.
+  Optional `-IncludeUnattend` bakes the (disk-wiping) answer file at the ISO root; `-NoHarden`
+  skips injection. **Chose image injection over a `sources\$OEM$` folder** because `$OEM$` needs
+  `<UseConfigurationSet>` (flaky on 24H2) — and documented the real gotcha that Setup **skips
+  `SetupComplete.cmd` when an OEM key is in firmware** (the Acer), with the manual /
+  FirstLogonCommands fallback.
+- **Answer file now targets Windows 11 Pro with the Pro KMS GVLK** (`W269N-WFGWX-YVC9B-4J6C9-T83GX`),
+  matched to `/IMAGE/NAME = Windows 11 Pro` (was Enterprise) so it lines up with the Pro deploy
+  ISO - a mismatched edition key can trigger an edition switch during Setup. GVLKs are public,
+  select the edition and suppress the key prompt, and activate later against KMS / AD-based
+  activation (the OS shows "not activated" until it reaches the KMS host - expected). Comment lists
+  the common Win11 GVLKs for switching editions.
+- **`unattend/New-UnattendIso.ps1`** — scripts the tiny secondary answer-file ISO (oscdimg) so the
+  golden install ISO stays untouched; attach it as a 2nd CD-ROM.
+- **Privacy hardening toggles renamed to verb form** (`DisableTelemetry`, `DisableCopilotAndRecall`,
+  …) with an explicit header: `$true = DO IT (turn the feature OFF)`, `$false = leave Windows
+  default`. Removes the ambiguity of noun toggles like `Telemetry = $true` for anyone reading the
+  file rather than the doc.
+
+- **`harden/Invoke-PrivacyHardening.ps1` + `harden/SetupComplete.cmd` + `docs/PRIVACY-HARDENING.md`.**
+  A dev-safe, privacy-centric hardening set that can be **baked into the media** (via the `$OEM$`
+  tree, so `SetupComplete.cmd` runs it as SYSTEM before first logon) or run standalone for testing.
+  Toggle-driven (`$H` table): telemetry/DiagTrack, advertising & suggestions, activity history,
+  **Copilot + Recall** (Copilot+ Acer), Bing/Cortana search, widgets, location/speech/inking,
+  consumer-app auto-install, Edge nags, OneDrive auto-install, curated appx debloat, and SMB1
+  removal are ON; aggressive network hardening (LLMNR/mDNS/NetBIOS) and Defender dev-folder
+  exclusions are OFF by default (they can affect dev discovery / reduce protection). Per-user
+  tweaks target the **Default** hive so new profiles inherit them. The appx debloat has an
+  explicit **KEEP guard** so winget/Store/Terminal/WebView2/framework packages can never be
+  removed. Deliberately does not touch Windows Update, Defender, RDP, or the Time service.
+- **`unattend/autounattend-Win11.xml` + `docs/UNATTEND-Win11-ESXi.md`.** Unblocks installing the
+  patched (or stock) Win11 media on an ESXi VM **without vCenter**: the VM has no vTPM, and Win11
+  Setup refuses to run without TPM 2.0. The answer file writes the `LabConfig` bypass keys
+  (TPM/SecureBoot/RAM/storage/CPU) before Setup's compatibility gate, lays down a clean UEFI/GPT
+  disk, selects the edition **by name** (trim-safe), and skips OOBE into a local admin. The doc
+  covers why standalone-ESXi vTPM is impractical (NKP needs a cluster; manual keys don't survive
+  reboots), how to deliver the file as a separate tiny ISO (so the golden media stays
+  non-destructive), the Winhance/UnattendedWinstall debloat story, and an honest "do you even need
+  to slipstream Win11?" analysis (Microsoft ISOs are not continuously patched; for a lab VM with
+  internet, stock ISO + answer file + Windows Update is a valid, much faster path).
+
+### Docs
+- **`docs/RUNBOOK.md` §1.1 Timing & throughput** — measured build times from the real
+  Win11-25H2 July run (3 editions, trimmed, ~3 h 51 m on 6 vCPU): per-phase breakdown, the fact
+  that per-edition install.wim servicing is ~90% of the wall clock and scales linearly, planning
+  estimates for a full `RunMediaJobs` pass (~12–14 h → why the task is 02:00 / 20 h limit), and
+  the note that on this host's storage tier the wall time is bound by DISM's serial per-image
+  servicing (CBS + WIM recompression), not by disk or core count.
+- **Corrected the bottleneck analysis** after confirming `D:` is NVMe (Dell P5600 behind a PERC
+  H755N, RAID-5 write-back): storage is not the limiter, so neither faster disk nor more vCPU
+  meaningfully cuts the ~4 h/build wall time. The real levers are patching fewer editions and the
+  ALREADY-BUILT no-op. RAID-5 vs RAID-10 is a resilience choice here, not a build-speed one.
+
+## [3.4.1] - 2026-07-15
+
+### Fixed
+- **`Slipstream-WindowsMedia.ps1` (→ v3.4.1) threw `The term 'Get-TS' is not recognized` on
+  startup.** The v3.4.0 trim-resolution block was added ABOVE the `function Get-TS` definition,
+  and PowerShell runs top-to-bottom - so the first call resolved nothing. The preamble
+  (`$ErrorActionPreference`, `$ScriptVersion`, `Get-TS`) is now defined immediately after the
+  `param()` block, before any code that uses it. **The quality gate did not catch this** - it is
+  a runtime name-resolution error, not a syntax error, so AST parse and PSSA were both silent.
+- **Quality gate (→ v1.5.1): new Rule F — script-local function CALLED before it is DEFINED.**
+  Flags exactly the class above. It considers only TOP-LEVEL calls (a call nested inside another
+  function is deferred until that function runs, so a legitimate forward reference between
+  functions is not flagged). This is a hard FAIL - it always throws at runtime.
 
 ## [3.4.0] - 2026-07-15
 

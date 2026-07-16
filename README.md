@@ -54,11 +54,20 @@ server2025-servicing/
 │   ├── Slipstream-WindowsMedia.ps1  # build patched ISO (Server 2025 / Win11; edition subset + trim)
 │   ├── Invoke-MediaJobs.ps1         # build every product in RunMediaJobs, in order (scheduled entry point)
 │   ├── ISO_Inventory.ps1            # read-only: report editions + archive contents for all sources
+│   ├── New-DeployableIso.ps1        # remaster newest patched ISO -> single-edition + hardening baked in
 │   ├── Repair-Server2025Store.ps1   # repair a live host's store (+WinRE)
 │   ├── Check-Packages.ps1           # verify a WIM has needed payloads pre-repair
 │   └── Watch-Server2025Updates.ps1  # (legacy) Server-only daily detector
+├── unattend/
+│   ├── autounattend-Win11.xml       # unattended Win11 install for ESXi (no vTPM): TPM/SB/RAM bypass
+│   └── New-UnattendIso.ps1          # scripted: wrap the answer file into a tiny secondary ISO
+├── harden/
+│   ├── Invoke-PrivacyHardening.ps1  # dev-safe privacy/de-bloat (toggle-driven; KEEP guard for dev tools)
+│   └── SetupComplete.cmd            # runs the hardening as SYSTEM at first boot (injected into image)
 ├── docs/
 │   ├── EDITIONS.md                  # DefaultEditions + the selection resolver (READ BEFORE EDITING config/)
+│   ├── UNATTEND-Win11-ESXi.md       # the answer file + "do you even need to slipstream Win11?"
+│   ├── PRIVACY-HARDENING.md         # what the hardening does, dev-critical keeps, image bake-in + Acer caveat
 │   ├── RUNBOOK.md                   # step-by-step operational procedures
 │   ├── LESSONS-LEARNED.md           # the non-obvious gotchas, with fixes
 │   └── INCIDENT-csFiles.md          # the real case this tooling was hardened against
