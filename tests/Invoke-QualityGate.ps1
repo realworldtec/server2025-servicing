@@ -65,7 +65,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.6.0
+    Version : 1.7.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -376,7 +376,7 @@ if ($rulesFindings -eq 0) {
 # This is the file operators hand-edit, so a bad edit must fail HERE - in seconds - and not
 # four hours into a build. Same validation the slipstream applies at startup.
 Write-Host ""
-Write-Host "[4/5] Product config" -ForegroundColor Cyan
+Write-Host "[4/5] Config files (Products + Deploy)" -ForegroundColor Cyan
 $cfg = Join-Path $Path 'config\Products.psd1'
 if (-not (Test-Path $cfg)) {
     Write-Host "  FAIL  config\Products.psd1 not found - the slipstream cannot run without it." -ForegroundColor Red
@@ -457,6 +457,53 @@ if (-not (Test-Path $cfg)) {
             Write-Host "        Changing it makes the scheduled task silently archive nothing." -ForegroundColor Red
         }
     }
+}
+
+# ---- config\Deploy.psd1: golden-image deploy profiles (optional) ----
+# Same idea as Products.psd1: the file an operator edits must fail HERE, in seconds, not partway
+# into a 12 GB golden build. Validates: parses as data; DefaultProfile names a real profile; every
+# profile has Product + EditionName; the Product is defined in Products.psd1; and an install that's
+# switched on names its installer (Office->OfficeOdt, Acrobat->AcrobatIso).
+$dcfg = Join-Path $Path 'config\Deploy.psd1'
+if (Test-Path $dcfg) {
+    $droot = $null
+    try { $droot = Import-PowerShellDataFile -Path $dcfg -ErrorAction Stop }
+    catch {
+        Write-Host ("  FAIL  config\Deploy.psd1 is not valid PowerShell data: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        $failures++
+    }
+    if ($droot) {
+        $dprofs = if ($droot.ContainsKey('Profiles')) { $droot.Profiles } else { $droot }
+        if ($droot.ContainsKey('DefaultProfile') -and -not ($dprofs -and $dprofs.ContainsKey([string]$droot.DefaultProfile))) {
+            $failures++
+            Write-Host ("  FAIL  Deploy.psd1 DefaultProfile '{0}' is not a defined profile." -f $droot.DefaultProfile) -ForegroundColor Red
+        }
+        if ($dprofs) {
+            foreach ($pname in ($dprofs.Keys | Sort-Object)) {
+                $p = $dprofs[$pname]
+                $e = @()
+                if ($p -isnot [hashtable]) { $e += 'not a hashtable' }
+                else {
+                    foreach ($req in @('Product','EditionName')) {
+                        if (-not $p.ContainsKey($req) -or [string]::IsNullOrWhiteSpace([string]$p[$req])) { $e += "missing '$req'" }
+                    }
+                    if ($p.ContainsKey('Product') -and $cfgProducts -and -not $cfgProducts.ContainsKey([string]$p['Product'])) {
+                        $e += "Product '$($p['Product'])' is not defined in Products.psd1"
+                    }
+                    if ($p.ContainsKey('Office')  -and [bool]$p['Office']  -and [string]::IsNullOrWhiteSpace([string]$p['OfficeOdt'])) { $e += "Office on but OfficeOdt empty" }
+                    if ($p.ContainsKey('Acrobat') -and [bool]$p['Acrobat'] -and [string]::IsNullOrWhiteSpace([string]$p['AcrobatIso'])) { $e += "Acrobat on but AcrobatIso empty" }
+                }
+                if ($e.Count -gt 0) {
+                    $failures++
+                    Write-Host ("  FAIL  Deploy[{0}] {1}" -f $pname, ($e -join '; ')) -ForegroundColor Red
+                } else {
+                    Write-Host ("  ok    Deploy[{0,-16}] {1} / {2}" -f $pname, $p['Product'], $p['EditionName']) -ForegroundColor Green
+                }
+            }
+        }
+    }
+} else {
+    Write-Host "  ok    no config\Deploy.psd1 (deploy profiles are optional)" -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------

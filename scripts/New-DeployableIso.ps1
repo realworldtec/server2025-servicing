@@ -65,6 +65,11 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
+    # ---- Golden-image profile (config-driven; any switch below OVERRIDES the profile) ----
+    # The profile in config\Deploy.psd1 supplies the defaults for everything - so a bare run builds
+    # the DefaultProfile golden image. Name a different one with -DeployProfile.
+    [string]$DeployProfile,
+    [string]$DeployConfig,        # default ..\config\Deploy.psd1
     [string]$Product     = 'Win11-25H2',
     [string]$EditionName = 'Windows 11 Pro',
     [string]$ConfigPath,
@@ -82,11 +87,24 @@ param(
     [string]$FirefoxUrl  = 'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US',
     [switch]$NoFirefox,
     [switch]$SkipCurrencyCheck,   # skip the "is the source built with the current LCU?" warning
+    # ---- First-logon app installs (baked at BUILD time; installed OFFLINE at first logon) ----
+    # Office LTSC 2024: the build DOWNLOADS the current Office bits from the Microsoft CDN and BAKES
+    # them into the image, so the target installs offline (reproducible per cycle; self-contained
+    # USB). Supply a local ODT setup.exe (-OfficeOdt) OR a URL to the ODT self-extractor
+    # (-OfficeOdtUrl, from download page id=49117). The Office *bits* are fresh from the CDN either
+    # way; the ODT tool is only the downloader.
+    [string]$OfficeOdt,           # local ODT setup.exe; takes precedence over -OfficeOdtUrl
+    [string]$OfficeOdtUrl,        # URL to officedeploymenttool_*.exe (downloaded + extracted at build)
+    [string]$OfficeConfig,        # ODT config xml; default office\proplus2024.xml
+    [switch]$NoOffice,            # don't download / bake / enable Office
+    # Acrobat Pro DC: EMBED the ISO into the image; the target mounts + installs it offline.
+    [string]$AcrobatIso,          # build-host path to AcrobatDC.iso to bake in; omit => Acrobat skipped
+    [switch]$NoAcrobat,
     [switch]$KeepWork
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.2.0'
+$ScriptVersion = '1.5.0'   # config-driven from config\Deploy.psd1 (switches override)
 function Get-TS { '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # ---- Locate oscdimg (ADK) -----------------------------------------------------
@@ -166,11 +184,48 @@ function Get-LastPatchTuesday {
     return $pt.Date
 }
 
-# ---- Load the product profile -------------------------------------------------
+# ---- Load the deploy (golden-image) profile: profile = defaults, explicit switches override -----
 $repo = Split-Path $PSScriptRoot -Parent
+if (-not $DeployConfig) { $DeployConfig = Join-Path $repo 'config\Deploy.psd1' }
+$dp = @{}
+if (Test-Path $DeployConfig) {
+    $deployCfg  = Import-PowerShellDataFile -Path $DeployConfig -ErrorAction Stop
+    $dpProfiles = if ($deployCfg.ContainsKey('Profiles')) { $deployCfg.Profiles } else { $deployCfg }
+    if (-not $DeployProfile -and $deployCfg.ContainsKey('DefaultProfile')) { $DeployProfile = [string]$deployCfg.DefaultProfile }
+    if ($DeployProfile) {
+        if (-not ($dpProfiles -and $dpProfiles.ContainsKey($DeployProfile))) {
+            throw "Deploy profile '$DeployProfile' not found in $DeployConfig. Defined: $(($dpProfiles.Keys | Sort-Object) -join ', ')."
+        }
+        $dp = $dpProfiles[$DeployProfile]
+        Write-Host "Deploy profile: '$DeployProfile' (from $DeployConfig)"
+    }
+} elseif ($DeployProfile) {
+    throw "Deploy config not found: $DeployConfig (but -DeployProfile '$DeployProfile' was given)."
+}
+
+# Resolve each setting: an EXPLICIT command-line value wins; else the profile; else the param's
+# built-in default. $PSBoundParameters says what was passed explicitly.
+$B = $PSBoundParameters
+if (-not $B.ContainsKey('Product')      -and $dp.ContainsKey('Product')      -and $dp.Product)      { $Product      = [string]$dp.Product }
+if (-not $B.ContainsKey('EditionName')  -and $dp.ContainsKey('EditionName')  -and $dp.EditionName)  { $EditionName  = [string]$dp.EditionName }
+if (-not $B.ContainsKey('OfficeConfig') -and $dp.ContainsKey('OfficeConfig') -and $dp.OfficeConfig) { $OfficeConfig = [string]$dp.OfficeConfig }
+if (-not $B.ContainsKey('OfficeOdt')    -and $dp.ContainsKey('OfficeOdt')    -and $dp.OfficeOdt)    { $OfficeOdt    = [string]$dp.OfficeOdt }
+if (-not $B.ContainsKey('FirefoxSetup') -and $dp.ContainsKey('FirefoxSetup') -and $dp.FirefoxSetup) { $FirefoxSetup = [string]$dp.FirefoxSetup }
+if (-not $B.ContainsKey('AcrobatIso')   -and $dp.ContainsKey('AcrobatIso')   -and $dp.AcrobatIso)   { $AcrobatIso   = [string]$dp.AcrobatIso }
+if (-not $B.ContainsKey('IncludeUnattend') -and $dp.ContainsKey('IncludeUnattend')) { $IncludeUnattend = [bool]$dp.IncludeUnattend }
+if (-not $B.ContainsKey('NoHarden')     -and $dp.ContainsKey('Harden'))  { $NoHarden  = -not [bool]$dp.Harden }
+if (-not $B.ContainsKey('NoFirefox')    -and $dp.ContainsKey('Firefox')) { $NoFirefox = -not [bool]$dp.Firefox }
+if (-not $B.ContainsKey('NoOffice')     -and $dp.ContainsKey('Office'))   { $NoOffice  = -not [bool]$dp.Office }
+if (-not $B.ContainsKey('NoAcrobat')    -and $dp.ContainsKey('Acrobat'))  { $NoAcrobat = -not [bool]$dp.Acrobat }
+# Post-install feature flags (baked into postinstall.config.json). Default $true if the profile is silent.
+$cfgDebloat  = if ($dp.ContainsKey('DebloatAppx'))    { [bool]$dp.DebloatAppx }    else { $true }
+$cfgOneDrive = if ($dp.ContainsKey('RemoveOneDrive')) { [bool]$dp.RemoveOneDrive } else { $true }
+
+# ---- Load the product profile -------------------------------------------------
 if (-not $ConfigPath)   { $ConfigPath   = Join-Path $repo 'config\Products.psd1' }
 if (-not $HardenDir)    { $HardenDir    = Join-Path $repo 'harden' }
 if (-not $UnattendPath) { $UnattendPath = Join-Path $repo 'unattend\autounattend-Win11.xml' }
+if (-not $OfficeConfig) { $OfficeConfig = Join-Path $repo 'office\proplus2024.xml' }
 if (-not (Test-Path $ConfigPath)) { throw "Config not found: $ConfigPath" }
 
 $cfg = Import-PowerShellDataFile -Path $ConfigPath -ErrorAction Stop
@@ -234,6 +289,8 @@ Write-Output "$(Get-TS): Source ISO  : $SourceIso"
 Write-Output "$(Get-TS): Keep edition: $EditionName"
 Write-Output "$(Get-TS): Harden      : $(if ($NoHarden) { 'NO (image injection skipped)' } else { "$HardenDir -> image \Windows\Setup\Scripts" })"
 Write-Output "$(Get-TS): Firefox     : $(if ($NoFirefox) { 'NO' } elseif ($FirefoxSetup) { "supplied: $FirefoxSetup" } else { 'download latest offline installer + bake in' })"
+Write-Output "$(Get-TS): Office      : $(if ($NoOffice) { 'NO' } elseif ($OfficeOdt -or $OfficeOdtUrl) { 'download current bits + BAKE IN (offline install at first logon)' } else { 'no -OfficeOdt/-OfficeOdtUrl -> not baked' })"
+Write-Output "$(Get-TS): Acrobat     : $(if ($NoAcrobat -or -not $AcrobatIso) { 'NO (no -AcrobatIso)' } else { "EMBED $AcrobatIso (offline install at first logon)" })"
 Write-Output "$(Get-TS): Unattend    : $(if ($IncludeUnattend) { "BAKED AT ROOT (wipes disk 0!) - $UnattendPath" } else { 'not baked (attach separately)' })"
 Write-Output "$(Get-TS): Output ISO  : $OutputIso"
 
@@ -340,11 +397,63 @@ if (-not $NoFirefox) {
     }
 }
 
-# ---- 3b. Inject hardening (+ Firefox installer) INTO the image ----------------
+# ---- 3a2. Office: fetch a fresh ODT + DOWNLOAD current bits (to bake in) --------
+# The build pulls the CURRENT Office source from the CDN and bakes it in, so the target installs
+# OFFLINE at first logon (reproducible per cycle; self-contained USB). $officeSrcReady, when set,
+# is a folder containing an "Office\Data\..." tree ready to copy into the image.
+$officeSrcReady = $null
+$odtSetupLocal  = $null
+$bakeOffice = (-not $NoHarden) -and (-not $NoOffice) -and ($OfficeOdt -or $OfficeOdtUrl)
+if ((-not $NoHarden) -and (-not $NoOffice) -and (-not $OfficeOdt) -and (-not $OfficeOdtUrl)) {
+    Write-Warning "$(Get-TS): Office requested but no -OfficeOdt/-OfficeOdtUrl - skipping Office. Supply the ODT (download page id=49117)."
+}
+if ($bakeOffice) {
+    if (-not (Test-Path $OfficeConfig)) { throw "OfficeConfig not found: $OfficeConfig" }
+    # 1) Resolve the ODT setup.exe: local override, else download the self-extractor + /extract.
+    if ($OfficeOdt) {
+        if (-not (Test-Path $OfficeOdt)) { throw "OfficeOdt not found: $OfficeOdt" }
+        $odtSetupLocal = $OfficeOdt
+        Write-Output "$(Get-TS): Office: using supplied ODT $odtSetupLocal"
+    } else {
+        $odtExe = Join-Path $TMP 'odt_selfextract.exe'
+        $odtDir = Join-Path $TMP 'odt'
+        Write-Output "$(Get-TS): Office: downloading ODT self-extractor..."
+        Start-BitsTransfer -Source $OfficeOdtUrl -Destination $odtExe -ErrorAction Stop
+        New-Item -ItemType Directory -Path $odtDir -Force | Out-Null
+        Write-Output "$(Get-TS): Office: extracting ODT..."
+        Start-Process -FilePath $odtExe -ArgumentList ("/extract:`"{0}`" /quiet" -f $odtDir) -Wait
+        $odtSetupLocal = Join-Path $odtDir 'setup.exe'
+        if (-not (Test-Path $odtSetupLocal)) { throw "ODT setup.exe not found after extract ($odtSetupLocal). Check -OfficeOdtUrl." }
+    }
+    # 2) Temp download config (SourcePath -> scratch), then pull the current Office bits.
+    $officeSrc = Join-Path $TMP 'officesrc'
+    New-Item -ItemType Directory -Path $officeSrc -Force | Out-Null
+    $dlCfg = Join-Path $TMP 'office_download.xml'
+    (Get-Content -LiteralPath $OfficeConfig -Raw).Replace('C:\Windows\Setup\Files\Office', $officeSrc) |
+        Set-Content -LiteralPath $dlCfg -Encoding UTF8
+    Write-Output "$(Get-TS): Office: downloading current bits from the CDN (this is the slow part, ~3 GB)..."
+    $dl = Start-Process -FilePath $odtSetupLocal -ArgumentList @('/download', "`"$dlCfg`"") -Wait -PassThru
+    if (($dl.ExitCode -ne 0) -or (-not (Test-Path (Join-Path $officeSrc 'Office\Data')))) {
+        throw "Office /download failed (exit $($dl.ExitCode)); no Office\Data under $officeSrc. Check internet / the config."
+    }
+    $officeSrcReady = $officeSrc
+    $szGB = [math]::Round((Get-ChildItem $officeSrc -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
+    Write-Output "$(Get-TS): Office: source ready ($szGB GB) -> baking into the image"
+}
+
+# Resolve the Acrobat ISO to embed (copied into the image; target mounts it locally at first logon).
+$acrobatLocal = $null
+if ((-not $NoHarden) -and (-not $NoAcrobat) -and $AcrobatIso) {
+    if (-not (Test-Path $AcrobatIso)) { throw "AcrobatIso not found: $AcrobatIso" }
+    $acrobatLocal = $AcrobatIso
+    Write-Output "$(Get-TS): Acrobat: embedding $acrobatLocal ($([math]::Round((Get-Item $AcrobatIso).Length/1GB,2)) GB)"
+}
+
+# ---- 3b. Inject hardening + post-install + app payloads INTO the image ---------
 # Image injection, not a sources\$OEM$ folder: it doesn't depend on <UseConfigurationSet> (flaky
-# on 24H2) and guarantees the files are on the OS drive. One mount cycle covers both payloads.
+# on 24H2) and guarantees the files land on the OS drive. One mount cycle covers every payload.
 if ((-not $NoHarden) -or $ffLocal) {
-    $needed = @('SetupComplete.cmd','Invoke-PrivacyHardening.ps1')
+    $needed = @('SetupComplete.cmd','Invoke-PrivacyHardening.ps1','Invoke-PostInstall.ps1')
     if (-not $NoHarden) {
         foreach ($f in $needed) {
             if (-not (Test-Path (Join-Path $HardenDir $f))) { throw "Hardening file missing: $(Join-Path $HardenDir $f) (or pass -NoHarden)." }
@@ -356,28 +465,58 @@ if ((-not $NoHarden) -or $ffLocal) {
     Mount-WindowsImage -ImagePath $installWim -Index 1 -Path $mnt | Out-Null
     $Script:MountedImg = $mnt
     try {
+        $scriptsDir = Join-Path $mnt 'Windows\Setup\Scripts'
+        $filesDir   = Join-Path $mnt 'Windows\Setup\Files'
         if (-not $NoHarden) {
-            $dest = Join-Path $mnt 'Windows\Setup\Scripts'
-            New-Item -ItemType Directory -Path $dest -Force | Out-Null
-            foreach ($f in $needed) { Copy-Item (Join-Path $HardenDir $f) (Join-Path $dest $f) -Force }
-            Write-Output "$(Get-TS): Injected hardening -> \Windows\Setup\Scripts\ ($($needed -join ', '))"
+            New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+            foreach ($f in $needed) { Copy-Item (Join-Path $HardenDir $f) (Join-Path $scriptsDir $f) -Force }
+            Write-Output "$(Get-TS): Injected hardening + post-install -> \Windows\Setup\Scripts\ ($($needed -join ', '))"
         }
         if ($ffLocal) {
-            $ffDest = Join-Path $mnt 'Windows\Setup\Files'
-            New-Item -ItemType Directory -Path $ffDest -Force | Out-Null
-            Copy-Item $ffLocal (Join-Path $ffDest 'FirefoxSetup.exe') -Force
-            Write-Output "$(Get-TS): Injected Firefox -> \Windows\Setup\Files\FirefoxSetup.exe (installed at first logon by a self-removing task)"
+            New-Item -ItemType Directory -Path $filesDir -Force | Out-Null
+            Copy-Item $ffLocal (Join-Path $filesDir 'FirefoxSetup.exe') -Force
+            Write-Output "$(Get-TS): Injected Firefox -> \Windows\Setup\Files\FirefoxSetup.exe"
+        }
+        if ($officeSrcReady) {
+            $offDir = Join-Path $filesDir 'Office'
+            New-Item -ItemType Directory -Path $offDir -Force | Out-Null
+            Copy-Item $odtSetupLocal (Join-Path $offDir 'setup.exe') -Force
+            Copy-Item $OfficeConfig  (Join-Path $offDir (Split-Path $OfficeConfig -Leaf)) -Force
+            # The downloaded "Office" tree lands at ...\Files\Office\Office (SourcePath parent = ...\Files\Office).
+            Copy-Item (Join-Path $officeSrcReady 'Office') $offDir -Recurse -Force
+            Write-Output "$(Get-TS): Injected Office (ODT + config + source) -> \Windows\Setup\Files\Office\ (OFFLINE install)"
+        }
+        if ($acrobatLocal) {
+            New-Item -ItemType Directory -Path $filesDir -Force | Out-Null
+            Copy-Item $acrobatLocal (Join-Path $filesDir 'AcrobatDC.iso') -Force
+            Write-Output "$(Get-TS): Embedded Acrobat -> \Windows\Setup\Files\AcrobatDC.iso"
+        }
+        # postinstall.config.json: edit-free feature flags Invoke-PostInstall.ps1 reads at first logon.
+        if (-not $NoHarden) {
+            $officeCfgTarget = if ($officeSrcReady) { 'C:\Windows\Setup\Files\Office\' + (Split-Path $OfficeConfig -Leaf) } else { '' }
+            $acrobatTarget   = if ($acrobatLocal)   { 'C:\Windows\Setup\Files\AcrobatDC.iso' } else { '' }
+            $piConfig = [ordered]@{
+                DebloatAppx    = $cfgDebloat
+                RemoveOneDrive = $cfgOneDrive
+                InstallFirefox = [bool]$ffLocal
+                InstallOffice  = [bool]$officeSrcReady
+                OfficeSetup    = 'C:\Windows\Setup\Files\Office\setup.exe'
+                OfficeConfig   = $officeCfgTarget
+                InstallAcrobat = [bool]$acrobatLocal
+                AcrobatSource  = $acrobatTarget
+            }
+            Set-Content -Path (Join-Path $scriptsDir 'postinstall.config.json') -Value ($piConfig | ConvertTo-Json) -Encoding UTF8
+            Write-Output "$(Get-TS): Wrote postinstall.config.json (Office=$($piConfig.InstallOffice), Acrobat=$($piConfig.InstallAcrobat), Firefox=$($piConfig.InstallFirefox))"
         }
     } finally {
         Dismount-WindowsImage -Path $mnt -Save | Out-Null
         $Script:MountedImg = $null
     }
     if (-not $NoHarden) {
-        Write-Output "$(Get-TS): NOTE: the hardening runs from the answer file's SPECIALIZE RunSynchronousCommand"
-        Write-Output "$(Get-TS):       (SYSTEM, pre-OOBE, no logon) - works on the Acer's OEM-firmware-key too. Attach"
-        Write-Output "$(Get-TS):       autounattend-Win11.xml (or use -IncludeUnattend). Booting WITHOUT the answer file"
-        Write-Output "$(Get-TS):       falls back to SetupComplete.cmd, which Setup SKIPS on OEM-key machines - then run"
-        Write-Output "$(Get-TS):       once by hand: powershell -File C:\Windows\Setup\Scripts\Invoke-PrivacyHardening.ps1 -AlsoCurrentUser"
+        Write-Output "$(Get-TS): NOTE: hardening (registry/policy) runs at SPECIALIZE via the answer file; the STATEFUL"
+        Write-Output "$(Get-TS):       work (debloat, OneDrive removal, Firefox/Office/Acrobat installs) runs at FIRST"
+        Write-Output "$(Get-TS):       LOGON via Invoke-PostInstall.ps1 (self-removing task). All app bits are BAKED -"
+        Write-Output "$(Get-TS):       Office + Acrobat install OFFLINE; the target needs internet only for WU/activation."
     }
 } else {
     Write-Output "$(Get-TS): -NoHarden + no Firefox: nothing to inject."

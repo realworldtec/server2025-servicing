@@ -4,29 +4,54 @@ Every script, the switches you'll actually use, and the end-to-end workflows. Ru
 **elevated** on the build host (ADK + WinPE installed). Paths assume the repo is at
 `C:\Projects\server2025-servicing`.
 
-> **The one file you edit:** `config\Products.psd1`. Which media gets built, where it's archived,
-> how many to keep, which editions — all live there. You should rarely need a switch to override it.
+> **The two files you edit:** `config\Products.psd1` (how the *media* is patched — editions, archive,
+> keep-count) and `config\Deploy.psd1` (the *golden image* — edition, hardening, Firefox/Office/Acrobat
+> with pinned installers). Everything else is switches you'll rarely need.
 
 ---
 
 ## TL;DR — the commands you run most
 
 ```powershell
-# Build ALL products in the config's RunMediaJobs list (what the nightly task runs)
+# Build the WHOLE golden image end-to-end: patch the media, then build the hardened, app-loaded,
+# disk-wiping deploy ISO. Uses config\Deploy.psd1 DefaultProfile. This is the one-command path.
+.\scripts\Build-GoldenImage.ps1
+
+# Just the nightly patched media (all products in RunMediaJobs)
 .\scripts\Invoke-MediaJobs.ps1
 
-# Build just one product now
-.\scripts\Invoke-MediaJobs.ps1 -Jobs Win11-25H2
+# Just the deploy ISO from the golden profile (patched media already current)
+.\scripts\New-DeployableIso.ps1
 
-# Make a single-edition, hardened, DISK-WIPING deploy ISO from the newest patched Win11-25H2
-.\scripts\New-DeployableIso.ps1 -EditionName 'Windows 11 Pro' -IncludeUnattend
-
-# Validate everything before you trust a change (run after ANY edit)
+# Validate everything after ANY edit (scripts + Products.psd1 + Deploy.psd1 + answer file)
 .\tests\Invoke-QualityGate.ps1
 
 # See what's built and what each ISO contains
 .\scripts\ISO_Inventory.ps1
 ```
+
+---
+
+## `Build-GoldenImage.ps1` — one command, whole image (v1.0.0)
+
+Reads a profile from `config\Deploy.psd1` and runs both stages: **[1/2]** refresh the patched media
+for the profile's product (slipstream, fast no-op if current) → **[2/2]** build the deploy golden
+ISO from the profile. This is the "point-in-time golden USB" button.
+
+```powershell
+.\scripts\Build-GoldenImage.ps1                          # DefaultProfile, end-to-end
+.\scripts\Build-GoldenImage.ps1 -DeployProfile Win11-Pro-Lean   # OS + hardening only (no Office/Acrobat)
+.\scripts\Build-GoldenImage.ps1 -SkipSlipstream          # media already current -> just the ISO
+```
+
+| Switch | Meaning |
+|---|---|
+| `-DeployProfile <name>` | Which golden profile to build (default = `Deploy.psd1` DefaultProfile). |
+| `-SkipSlipstream` | Skip the media refresh; build the ISO from existing patched media. |
+| `-NoProxy` | Pass `-NoProxy` to the slipstream. |
+| `-DeployConfig <path>` | Override the deploy config (default `..\config\Deploy.psd1`). |
+
+> Long by design: it can download ~3 GB of Office and build a ~12–13 GB ISO. Walk away.
 
 ---
 
@@ -92,37 +117,52 @@ One product failing doesn't stop the rest. This is what the scheduled task calls
 
 ---
 
-## `New-DeployableIso.ps1` — the remaster / deploy image (v1.2.x)
+## `New-DeployableIso.ps1` — the deploy image (v1.5.x, config-driven)
 
-Takes the **newest patched ISO** for a product and remasters it (minutes, no re-servicing) into a
-lean **single-edition** ISO with the privacy hardening + Firefox baked in. Optionally bakes the
-disk-wiping answer file for a fully unattended install.
+Builds the golden deploy ISO. **All settings come from a `config\Deploy.psd1` profile** — a bare
+`.\scripts\New-DeployableIso.ps1` builds the DefaultProfile; switches below override the profile for
+one-offs. It trims the newest patched media to one edition, downloads + bakes the current Office
+bits, embeds Acrobat, injects hardening + post-install, and bakes the disk-wiping answer file.
 
 ```powershell
-# Single Pro edition + hardening, answer file baked (WIPES DISK 0 on boot):
-.\scripts\New-DeployableIso.ps1 -EditionName 'Windows 11 Pro' -IncludeUnattend
+# Bare = build the DefaultProfile golden image (everything from config\Deploy.psd1):
+.\scripts\New-DeployableIso.ps1
 
-# Same but attach the answer file separately later (image not disk-wiping on its own):
-.\scripts\New-DeployableIso.ps1 -EditionName 'Windows 11 Pro'
+# A different profile:
+.\scripts\New-DeployableIso.ps1 -DeployProfile Win11-Pro-Lean
 
-# Offline build host (supply Firefox instead of downloading):
-.\scripts\New-DeployableIso.ps1 -EditionName 'Windows 11 Pro' -IncludeUnattend -FirefoxSetup C:\stage\FirefoxSetup.exe
+# One-off override (switches beat the profile), e.g. skip Office this once:
+.\scripts\New-DeployableIso.ps1 -NoOffice
 ```
 
-| Switch | Meaning |
+Everything below is a **profile field** (in `Deploy.psd1`) *and* a switch (for one-off overrides):
+
+| Switch / profile field | Meaning |
 |---|---|
+| `-DeployProfile <name>` | Golden profile from `Deploy.psd1` (default = its DefaultProfile). |
+| `-DeployConfig <path>` | Override the deploy config (default `..\config\Deploy.psd1`). |
 | `-Product <name>` | Source profile (default `Win11-25H2`). |
 | `-EditionName '<n>'` | The one edition to keep (default `Windows 11 Pro`). By NAME, so trimming can't pick wrong. |
 | `-IncludeUnattend` | Bake `autounattend.xml` at the ISO root → **fully unattended, WIPES DISK 0**. Off by default. |
 | `-UnattendPath <path>` | Answer file to bake (default `..\unattend\autounattend-Win11.xml`). |
-| `-NoHarden` | Skip injecting the hardening into the image. |
-| `-HardenDir <path>` | Folder with `SetupComplete.cmd` + `Invoke-PrivacyHardening.ps1` (default `..\harden`). |
-| `-NoFirefox` | Don't bake the Firefox installer. |
-| `-FirefoxSetup <path>` | Use a supplied installer instead of downloading. |
-| `-FirefoxUrl <url>` | Override the download URL (default = Mozilla latest x64 en-US). |
+| `-NoHarden` | Skip injecting the hardening + post-install into the image. |
+| `-HardenDir <path>` | Folder with `SetupComplete.cmd` + `Invoke-PrivacyHardening.ps1` + `Invoke-PostInstall.ps1` (default `..\harden`). |
+| `-NoFirefox` / `-FirefoxSetup <path>` / `-FirefoxUrl <url>` | Skip Firefox / supply an installer / override the download URL. |
+| `-OfficeOdt <setup.exe>` | Local ODT `setup.exe`. Build **downloads the current Office bits** with it and **bakes them in** (offline install). Omit both this and `-OfficeOdtUrl` → no Office. |
+| `-OfficeOdtUrl <url>` | Instead of a local ODT, download the ODT self-extractor (link from download page id=49117) at build. |
+| `-OfficeConfig <xml>` | ODT config (default `..\office\proplus2024.xml` = ProPlus + Visio, `SourcePath` = baked source). |
+| `-NoOffice` | Don't download/bake/enable Office. |
+| `-AcrobatIso <path>` | Build-host `AcrobatDC.iso` to **embed** in the image; target mounts + installs it offline. Omit → Acrobat skipped. |
+| `-NoAcrobat` | Don't embed/enable Acrobat. |
 | `-SkipCurrencyCheck` | Skip the "is the source built with the current LCU?" warning. |
-| `-SourceIso` / `-OutputIso` / `-WorkDir` | Override auto-found source / output name / scratch dir. |
-| `-KeepWork` | Keep the work dir (default: delete). |
+| `-SourceIso` / `-OutputIso` / `-WorkDir` / `-KeepWork` | Override source / output / scratch dir / keep work dir. |
+
+> **Two phases (v1.4.0+):** hardening writes **registry/policy at specialize** (safe); the
+> **stateful work — appx debloat, OneDrive removal, and the Firefox/Office/Acrobat installs — runs
+> at first logon** via `Invoke-PostInstall.ps1` (self-removing task). **All app bits are baked at
+> build time**, so Office + Acrobat install **offline**; the target needs internet only for Windows
+> Update / KMS activation. Evidence: `C:\ProgramData\PrivacyHardening\postinstall_*.log`.
+> Build cost: the deploy ISO grows to ~12-13 GB and the build downloads ~3 GB of Office each run.
 
 > **Currency guard:** on run it reads the source ISO's manifest LCU and compares to the catalog's
 > current LCU. `Currency OK` = current; a `CURRENCY WARNING` means the source predates the latest

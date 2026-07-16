@@ -1,0 +1,47 @@
+<Configuration ID="986f9ac6-bd34-41da-96ac-242bf8a22c01">
+  <!--
+    Office LTSC 2024 (Perpetual VL) config - used for BOTH build-time download and target install.
+
+    HOW IT'S USED BY New-DeployableIso.ps1 (v1.4.0+):
+      * BUILD TIME: the deploy build makes a temporary copy of this file with SourcePath rewritten
+        to a scratch folder, then runs `setup.exe /download <that copy>` to pull the CURRENT Office
+        bits from the Microsoft CDN. Those bits get baked into the image.
+      * TARGET (first logon): this file (SourcePath = C:\Windows\Setup\Files\Office) is what
+        Invoke-PostInstall.ps1 hands to `setup.exe /configure`, so Office installs OFFLINE from the
+        baked source. AllowCdnFallback="TRUE" is a safety net: if a baked file is ever missing, ODT
+        pulls it from the CDN (needs internet at first logon only in that fallback case).
+
+    SourcePath is the PARENT of the "Office" folder ODT creates - i.e. the source lives at
+    <SourcePath>\Office\Data\...  Keep the literal path below in sync with where the build bakes it.
+
+    Installs ProPlus 2024 Volume + Visio Pro 2024 Volume, en-us, excluding the listed apps.
+    PIDKEYs are the public LTSC 2024 VOLUME GVLKs; AUTOACTIVATE activates against KMS/ADBA via DNS.
+  -->
+  <Info Description="Office 2024 VL - offline install from baked source (ProPlus + Visio)" />
+  <Add OfficeClientEdition="64" Channel="PerpetualVL2024" AllowCdnFallback="TRUE" SourcePath="C:\Windows\Setup\Files\Office">
+    <Product ID="ProPlus2024Volume" PIDKEY="XJ2XN-FW8RK-P4HMP-DKDBV-GCVGB">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+    <Product ID="VisioPro2024Volume" PIDKEY="B7TN8-FJ8V3-7QYCP-HQPMV-YY89G">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+  </Add>
+  <Property Name="FORCEAPPSHUTDOWN" Value="FALSE" />
+  <Property Name="SCLCacheOverride" Value="0" />
+  <Property Name="AUTOACTIVATE" Value="1" />
+  <Updates Enabled="TRUE" />
+  <RemoveMSI />
+  <Display Level="None" AcceptEULA="TRUE" />
+</Configuration>

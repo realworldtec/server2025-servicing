@@ -1,0 +1,43 @@
+<Configuration ID="986f9ac6-bd34-41da-96ac-242bf8a22c01">
+  <!--
+    Office LTSC 2024 (Perpetual VL) install config for FIRST-BOOT ONLINE install.
+    Derived from the operator's proplusx64.xml, with two changes for the deploy pipeline:
+      * AllowCdnFallback="TRUE"  -> setup /configure downloads straight from the Office CDN, so
+        there is NO separate /download step and NO local source to bake. (The original was FALSE,
+        which requires a pre-downloaded local source - use that variant for an offline build.)
+      * Project + LanguagePack + ProofingTools removed (they were only in the download config and
+        were never installed anyway - the operator confirmed they aren't needed).
+    Installs: ProPlus 2024 Volume + Visio Pro 2024 Volume, en-us, excluding the apps the operator
+    excludes. AUTOACTIVATE=1 -> activates against KMS/ADBA via DNS auto-discovery. RemoveMSI strips
+    any pre-existing MSI Office.
+    PIDKEYs are the public LTSC 2024 VOLUME GVLKs (select edition + allow KMS; they do not activate
+    by themselves) - same keys the operator supplied.
+  -->
+  <Info Description="Office 2024 VL - first-boot online install (ProPlus + Visio)" />
+  <Add OfficeClientEdition="64" Channel="PerpetualVL2024" AllowCdnFallback="TRUE">
+    <Product ID="ProPlus2024Volume" PIDKEY="XJ2XN-FW8RK-P4HMP-DKDBV-GCVGB">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+    <Product ID="VisioPro2024Volume" PIDKEY="B7TN8-FJ8V3-7QYCP-HQPMV-YY89G">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+  </Add>
+  <Property Name="FORCEAPPSHUTDOWN" Value="FALSE" />
+  <Property Name="SCLCacheOverride" Value="0" />
+  <Property Name="AUTOACTIVATE" Value="1" />
+  <Updates Enabled="TRUE" />
+  <RemoveMSI />
+  <Display Level="None" AcceptEULA="TRUE" />
+</Configuration>

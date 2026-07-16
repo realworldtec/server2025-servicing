@@ -50,7 +50,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.4.0'
+$ScriptVersion = '1.5.0'   # policy-only at specialize; stateful work moved to Invoke-PostInstall.ps1
 
 # =====================================================================================
 #  TOGGLES - the whole control surface. Each entry is an ACTION this script performs.
@@ -61,8 +61,11 @@ $ScriptVersion = '1.4.0'
 #  Read the key name as the action. e.g.
 #     DisableTelemetry = $true   -> telemetry is turned OFF
 #     DisableTelemetry = $false  -> telemetry left at Windows default (untouched)
-#     DebloatAppx      = $true   -> the listed consumer apps are removed
+#     NeuterEdge       = $true   -> Edge background/telemetry/new-tab feed turned OFF
 #     NetworkHardening = $false  -> LLMNR/mDNS/NetBIOS left at Windows default
+#
+#  NOTE: appx debloat and the app installs (Firefox/Office/Acrobat) are NOT here - they run at
+#  first logon via Invoke-PostInstall.ps1. This script is registry/policy only (specialize-safe).
 # =====================================================================================
 $H = @{
     DisableTelemetry            = $true    # DiagTrack service + AllowTelemetry=0 + CEIP tasks off
@@ -75,16 +78,16 @@ $H = @{
     DisableLocationSpeechInking = $true    # location, online speech, inking/typing personalization off
     DisableConsumerFeatures     = $true    # "suggested"/auto-installed consumer apps off
     DisableStartRecommendations = $true    # Start "Recommended" section + tips/shortcuts recommendations off
+    DisableRecommendationsAndOffers = $true # Settings "recommendations & offers" + suggested content off
+    DisableLanguageListAccess   = $true    # stop websites reading your language list (HttpAcceptLanguageOptOut)
     ShowFullAppsList            = $true    # Start "All apps" as a FLAT LIST, not the categorised grid
     DisableProxyAutoDetect      = $true    # "Automatically detect settings" / WPAD auto-proxy off
     DisableEdgeNags             = $true    # Edge first-run, startup boost, personalization telemetry off
-    RemoveOneDrive              = $true    # stop OneDrive auto-install for new users + policy off
-    DebloatAppx                 = $true    # remove consumer bloat (KEEP guard protects dev-critical)
+    RemoveOneDrive              = $true    # policy: stop OneDrive auto-install (FULL uninstall runs in post-install)
     DisableSMB1                 = $true    # remove the SMB1 protocol (safe + recommended, even on dev)
     DisableDefenderSampleSubmission = $true # Defender: never auto-submit samples (keeps real-time protection ON)
     NeuterEdge                  = $true    # disable Edge background/telemetry/feedback + kill MSN new-tab feed
-    HardenFirefox               = $true    # Mozilla enterprise policy: telemetry/Pocket/studies/sponsored OFF (LibreWolf-like)
-    InstallFirefox              = $true    # silently install the baked-in offline installer if present (no network)
+    HardenFirefox               = $true    # Mozilla enterprise policy: telemetry/Pocket/sponsored/homepage/weather OFF
     EnableRemoteDesktop         = $true    # turn RDP ON (fDenyTSConnections=0) + firewall rule + require NLA
     SetNetworkPrivate           = $true    # treat UNIDENTIFIED networks as Private (not Public) by policy
 
@@ -106,10 +109,10 @@ $DefenderExcludePaths = @(
     # 'C:\src', 'C:\build'
 )
 
-# Where New-DeployableIso.ps1 bakes the offline Firefox installer. $H.InstallFirefox runs it /S if
-# it exists; if not (e.g. standalone run on an existing box), it's a no-op and you install Firefox
-# yourself - the Mozilla policy ($H.HardenFirefox) applies regardless.
-$FirefoxInstaller = 'C:\Windows\Setup\Files\FirefoxSetup.exe'
+# NOTE: Firefox/Office/Acrobat INSTALLS and appx debloat no longer run here - they run at first
+# logon via harden/Invoke-PostInstall.ps1 (registered by section 17). This script sets only
+# registry/policy, which is safe at the specialize pass. The Mozilla policy (section 18) applies
+# the moment Firefox is installed.
 
 # =====================================================================================
 #  Helpers (defined before any use)
@@ -399,6 +402,40 @@ if ($H.DisableProxyAutoDetect) {
 }
 
 # =====================================================================================
+#  8e. Settings "recommendations & offers" + suggested content off
+# =====================================================================================
+# Privacy & security > Recommendations & offers, and the "suggested content" that Settings shows.
+# Per-user (ContentDeliveryManager), so into the Default hive for new profiles.
+if ($H.DisableRecommendationsAndOffers) {
+    Info '[DisableRecommendationsAndOffers] Settings suggested content + offers off'
+    Invoke-WithDefaultHive {
+        $cdm = 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+        foreach ($n in 'SubscribedContent-338393Enabled','SubscribedContent-353694Enabled','SubscribedContent-353696Enabled') { Set-Reg $cdm $n 0 }
+        Set-Reg 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Start_ShowWebRecommendations' 0
+    }
+    if ($AlsoCurrentUser) {
+        $cdm = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+        foreach ($n in 'SubscribedContent-338393Enabled','SubscribedContent-353694Enabled','SubscribedContent-353696Enabled') { Set-Reg $cdm $n 0 }
+        Set-Reg 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Start_ShowWebRecommendations' 0
+    }
+}
+
+# =====================================================================================
+#  8f. Stop websites reading your language list
+# =====================================================================================
+# Privacy & security > General > "Let websites show me locally relevant content by accessing my
+# language list." Per-user opt-out flag.
+if ($H.DisableLanguageListAccess) {
+    Info '[DisableLanguageListAccess] websites cannot read the language list'
+    Invoke-WithDefaultHive {
+        Set-Reg 'Registry::HKEY_USERS\PH_Default\Control Panel\International\User Profile' 'HttpAcceptLanguageOptOut' 1
+    }
+    if ($AlsoCurrentUser) {
+        Set-Reg 'Registry::HKEY_CURRENT_USER\Control Panel\International\User Profile' 'HttpAcceptLanguageOptOut' 1
+    }
+}
+
+# =====================================================================================
 #  9. Edge nags
 # =====================================================================================
 if ($H.DisableEdgeNags) {
@@ -423,67 +460,12 @@ if ($H.RemoveOneDrive) {
 }
 
 # =====================================================================================
-# 11. Appx debloat  (KEEP guard protects dev-critical packages)
+# 11. Appx debloat  -> MOVED to harden/Invoke-PostInstall.ps1 (first logon)
 # =====================================================================================
-if ($H.DebloatAppx) {
-    Info '[DebloatAppx] removing consumer bloat (dev-critical protected)'
-
-    # Remove if the package name contains ANY of these...
-    $removeMatch = @(
-        'BingNews','BingWeather','BingSearch','Bing.Search',
-        'GamingApp','Xbox','ZuneMusic','ZuneVideo',
-        'windowscommunicationsapps','People','SolitaireCollection',
-        'Clipchamp','Todos','PowerAutomateDesktop','MicrosoftOfficeHub',
-        'GetHelp','Getstarted','Teams','MSTeams','Copilot','549981C3F5F10',
-        'MixedReality.Portal','WindowsMaps','YourPhone','Microsoft.Phone',
-        'WindowsFeedbackHub','OutlookForWindows','QuickAssist','Wallet',
-        'Microsoft.Windows.Ai.Copilot.Provider',
-        # Third-party promoted stubs that ship pre-provisioned / arrive via ContentDeliveryManager
-        # (the LinkedIn / WhatsApp / etc. tiles you saw). Match on vendor + common promo apps:
-        'LinkedIn','WhatsApp','Facebook','Instagram','SpotifyAB.Spotify','SpotifyMusic',
-        'Disney','PrimeVideo','Amazon.com.Amazon','TikTok','Netflix','Dolby','DevHome',
-        'Family','Microsoft.Windows.DevHome'
-    )
-    # ...UNLESS the name contains ANY of these. Dev-critical + generally-useful in-box tools.
-    $keepMatch = @(
-        'DesktopAppInstaller','WindowsStore','StorePurchaseApp','WindowsTerminal',
-        'WebView','VCLibs','UI.Xaml','NET.Native','DotNet',
-        'WindowsCalculator','WindowsNotepad','Paint','ScreenSketch','SnippingTool',
-        'SecHealthUI','WindowsCamera','Winget'
-    )
-
-    # (a) Provisioned packages -> stops them landing in every NEW profile.
-    $prov = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
-    foreach ($p in $prov) {
-        $name = $p.DisplayName
-        $wantRemove = $removeMatch | Where-Object { $name -like "*$_*" }
-        $mustKeep   = $keepMatch   | Where-Object { $name -like "*$_*" }
-        if ($wantRemove -and -not $mustKeep) {
-            try {
-                Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop | Out-Null
-                Info "  removed (provisioned)  $name"
-            } catch { Warn "  remove FAILED  $name - $($_.Exception.Message)" }
-        } elseif ($mustKeep) {
-            Info "  KEEP  $name"
-        }
-    }
-    # (b) Already-INSTALLED copies for all users -> cleans the profile that already exists (e.g. the
-    # local Admin created during OOBE, or your current box when run with -Force). Provisioned removal
-    # alone does NOT touch a profile that's already been created, which is why bloat can survive the
-    # specialize pass. KEEP guard applies here too.
-    $inst = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)
-    foreach ($a in $inst) {
-        $name = $a.Name
-        $wantRemove = $removeMatch | Where-Object { $name -like "*$_*" }
-        $mustKeep   = $keepMatch   | Where-Object { $name -like "*$_*" }
-        if ($wantRemove -and -not $mustKeep) {
-            try {
-                Remove-AppxPackage -Package $a.PackageFullName -AllUsers -ErrorAction Stop
-                Info "  removed (installed)  $name"
-            } catch { Warn "  remove FAILED (installed)  $name - $($_.Exception.Message)" }
-        }
-    }
-}
+# Appx removal at the specialize pass is unreliable: the Appx subsystem isn't fully up, so
+# Remove-AppxPackage / Remove-AppxProvisionedPackage silently no-op and the bloat survives (Xbox /
+# LinkedIn / WhatsApp came back every deploy). The debloat now runs in the FIRST-LOGON post-install
+# phase, where the Appx stack is settled and removal actually sticks. See Invoke-PostInstall.ps1.
 
 # =====================================================================================
 # 12. SMB1 - remove the legacy protocol (safe, recommended even on dev)
@@ -567,54 +549,29 @@ if ($H.NeuterEdge) {
 }
 
 # =====================================================================================
-# 17. Firefox install -> RUN-ONCE first-logon task that SELF-DESTRUCTS
+# 17. Register the FIRST-LOGON post-install task
 # =====================================================================================
-# We do NOT install Firefox here (specialize is too early - app installers are happier once the
-# OS is fully settled). Instead we register a scheduled task that fires at the FIRST logon,
-# installs Firefox silently from the BAKED-IN offline installer (no network - good for the Acer
-# before wifi/USB-ethernet is up), then removes both the task and its own helper script.
-# No-op if the installer isn't present (the Mozilla policy still applies once Firefox lands).
-$FirefoxTaskName   = 'PrivacyHardening-InstallFirefox'
-$FirefoxRunOnce    = 'C:\Windows\Setup\Scripts\FirstLogon-InstallFirefox.ps1'
-if ($H.InstallFirefox) {
-    if (Test-Path $FirefoxInstaller) {
-        Info "[InstallFirefox] registering run-once first-logon task '$FirefoxTaskName' (self-destructs)"
-        # The helper the task runs. SINGLE-QUOTED here-string: nothing below is expanded now - it
-        # is written verbatim and evaluated when the task runs. Keep the installer path + task name
-        # here in sync with $FirefoxInstaller / $FirefoxTaskName above (both are fixed system paths).
-        $helper = @'
-$ErrorActionPreference = 'SilentlyContinue'
-$log = 'C:\ProgramData\PrivacyHardening\firefox_install.log'
-"$([DateTime]::Now.ToString('s')) run-once Firefox install starting" | Out-File $log -Append
-$installer = 'C:\Windows\Setup\Files\FirefoxSetup.exe'
-if (Test-Path $installer) {
+# The STATEFUL work - appx debloat, OneDrive uninstall, and the app installs (Firefox, Office LTSC
+# 2024, Acrobat Pro DC) - runs at FIRST LOGON, not here: specialize is too early for appx ops and
+# installers (that's why the debloat kept failing). We register a run-once task that runs
+# Invoke-PostInstall.ps1 (injected next to THIS script by New-DeployableIso.ps1) as SYSTEM at the
+# first logon; that script does the work, then self-destructs. No-op if it isn't on the media.
+$PostInstallScript = 'C:\Windows\Setup\Scripts\Invoke-PostInstall.ps1'
+$PostInstallTask   = 'PrivacyHardening-PostInstall'
+if (Test-Path $PostInstallScript) {
+    Info "[PostInstall] registering first-logon task '$PostInstallTask'"
     try {
-        $p = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
-        "$([DateTime]::Now.ToString('s')) installer exit $($p.ExitCode)" | Out-File $log -Append
-    } catch { "$([DateTime]::Now.ToString('s')) FAILED $($_.Exception.Message)" | Out-File $log -Append }
+        $act = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                 -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`"" -f $PostInstallScript)
+        $trg = New-ScheduledTaskTrigger -AtLogOn
+        $prn = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest
+        $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                 -ExecutionTimeLimit (New-TimeSpan -Hours 3)   # Office online install can be slow
+        Register-ScheduledTask -TaskName $PostInstallTask -Action $act -Trigger $trg -Principal $prn -Settings $set -Force | Out-Null
+        Info "  task registered - runs debloat + app installs at first logon, then self-destructs"
+    } catch { Warn "  could not register post-install task: $($_.Exception.Message)" }
 } else {
-    "$([DateTime]::Now.ToString('s')) installer missing - nothing to do" | Out-File $log -Append
-}
-# Self-destruct: remove the task, then this script.
-Unregister-ScheduledTask -TaskName 'PrivacyHardening-InstallFirefox' -Confirm:$false -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-'@
-        try {
-            $rd = Split-Path $FirefoxRunOnce -Parent
-            if (-not (Test-Path $rd)) { New-Item -ItemType Directory -Path $rd -Force | Out-Null }
-            Set-Content -Path $FirefoxRunOnce -Value $helper -Encoding UTF8
-
-            $act = New-ScheduledTaskAction -Execute 'powershell.exe' `
-                     -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`"" -f $FirefoxRunOnce)
-            $trg = New-ScheduledTaskTrigger -AtLogOn
-            $prn = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest
-            $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-            Register-ScheduledTask -TaskName $FirefoxTaskName -Action $act -Trigger $trg -Principal $prn -Settings $set -Force | Out-Null
-            Info "  task registered - installs Firefox at first logon, then removes itself"
-        } catch { Warn "  could not register Firefox run-once task: $($_.Exception.Message)" }
-    } else {
-        Info "[InstallFirefox] no offline installer at $FirefoxInstaller - skipping (policy still applies once Firefox is installed)"
-    }
+    Info "[PostInstall] no Invoke-PostInstall.ps1 on the media - skipping (deploy without app installs/debloat)"
 }
 
 # =====================================================================================
@@ -655,6 +612,17 @@ if ($H.HardenFirefox) {
     Set-Reg $pref 'browser.newtabpage.activity-stream.feeds.topsites'        '{"Value":false,"Status":"locked"}' 'String'
     Set-Reg $pref 'browser.newtabpage.activity-stream.feeds.section.topstories' '{"Value":false,"Status":"locked"}' 'String'
     Set-Reg $pref 'browser.topsites.contile.enabled'                         '{"Value":false,"Status":"locked"}' 'String'
+    # ---- Homepage + new windows = blank; startup RESTORES previous session; new tab = blank ----
+    # The supported Homepage policy: URL is the homepage, StartPage 'previous-session' = "open
+    # previous windows and tabs" on launch. Locked=0 so you can still change it later.
+    Set-Reg "$ff\Homepage" 'URL'       'about:blank'        'String'
+    Set-Reg "$ff\Homepage" 'StartPage' 'previous-session'   'String'
+    Set-Reg "$ff\Homepage" 'Locked'    0
+    Set-Reg $ff 'NewTabPage' 0    # new tab = blank page (no Firefox Home)
+    # ---- New-tab weather widget OFF; do NOT auto-launch Firefox at Windows startup ----
+    Set-Reg $pref 'browser.newtabpage.activity-stream.showWeather'        '{"Value":false,"Status":"locked"}' 'String'
+    Set-Reg $pref 'browser.newtabpage.activity-stream.system.showWeather' '{"Value":false,"Status":"locked"}' 'String'
+    Set-Reg $pref 'browser.startup.windowsLaunchOnLogin.enabled'          '{"Value":false,"Status":"locked"}' 'String'
 }
 
 # =====================================================================================

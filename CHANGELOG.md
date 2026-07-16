@@ -6,6 +6,48 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+- **Two-phase deploy hardening: specialize = policy only, first logon = stateful + installs.** The
+  appx debloat kept surviving because Remove-Appx* is unreliable during Setup's specialize pass
+  (the Appx stack isn't up). Split responsibilities:
+  - `harden/Invoke-PrivacyHardening.ps1` (→ v1.5.0) now does **registry/policy only** at specialize
+    (safe, can't crash Setup). It no longer debloats or installs; it **registers a first-logon task**
+    that runs the new post-install script. New policy toggles: `DisableRecommendationsAndOffers`,
+    `DisableLanguageListAccess`, and expanded Firefox policy (blank homepage + new windows, new tab
+    blank, **startup restores previous session**, new-tab **weather off**, **launch-on-login off**).
+  - `harden/Invoke-PostInstall.ps1` (**new**, v1.0.0) runs at **first logon** (SYSTEM, self-destructs)
+    where the Appx stack is settled: appx debloat (now sticks), **OneDrive full uninstall + block**,
+    Firefox install, **Office LTSC 2024** (ODT, online from the CDN), **Acrobat Pro DC** (silent from
+    a supplied source). Config-driven via `postinstall.config.json`, idempotent, logs to
+    `C:\ProgramData\PrivacyHardening\postinstall_*.log`.
+
+### Added
+- **Config-driven golden image + one-command build.** The deploy side is now declarative, matching
+  how `Products.psd1` drives the slipstream:
+  - **`config/Deploy.psd1`** (new) holds golden-image profiles — source product, edition, unattend,
+    hardening, and the app payloads (Firefox/Office/Acrobat) with **pinned point-in-time installers**.
+    Ships `Win11-Pro-Golden` (full loadout) and `Win11-Pro-Lean` (OS + hardening only). This is the
+    file you edit; the sprawling switch list is gone from day-to-day use.
+  - **`New-DeployableIso.ps1` (→ v1.5.0)** reads a profile (`-DeployProfile`, default = DefaultProfile);
+    explicit switches still override for one-offs. A bare run builds the golden image.
+  - **`Build-GoldenImage.ps1`** (new, v1.0.0) — one command, whole image: refresh the patched media
+    for the profile's product (fast no-op if current), then build the deploy golden ISO. Sub-scripts
+    run as child processes so a stage failure stops the run cleanly.
+  - Quality gate (→ v1.7.0) now validates `Deploy.psd1` too: parses, `DefaultProfile` resolves, every
+    profile has `Product` (defined in `Products.psd1`) + `EditionName`, and an install that's on names
+    its installer (Office→`OfficeOdt`, Acrobat→`AcrobatIso`).
+- **Office 2024 + Acrobat baked into the deploy pipeline (self-contained USB).** `New-DeployableIso.ps1`
+  (→ v1.4.0) now **downloads the current Office source from the CDN at BUILD time and embeds it**,
+  along with the **Acrobat ISO**, so the target installs both **offline** at first logon
+  (reproducible per patch cycle; a USB works anywhere with no app-install internet dependency).
+  New params: `-OfficeOdt <setup.exe>` or `-OfficeOdtUrl <url>` (fetch a fresh ODT — nothing stale is
+  committed), `-OfficeConfig` (default `office/proplus2024.xml` = ProPlus + Visio, `SourcePath` set
+  to the baked source), `-AcrobatIso <path>` (embed the AcrobatDC.iso), `-NoOffice`, `-NoAcrobat`.
+  Trade-off: the deploy ISO grows to ~12-13 GB and the build downloads ~3 GB of Office each run.
+  `office/proplus2024.xml` is the operator's config trimmed to **ProPlus 2024 + Visio** (Project,
+  LanguagePack, ProofingTools dropped), `AllowCdnFallback=TRUE` as a safety net. The deploy build
+  injects `Invoke-PostInstall.ps1` + `postinstall.config.json` pointing at the baked local paths.
+
 ### Fixed
 - **Win11 answer file boot loop (`0x80220001`).** `unattend/autounattend-Win11.xml` placed the
   specialize-pass hardening trigger (`<RunSynchronous>`) under the **`Microsoft-Windows-Shell-Setup`**
