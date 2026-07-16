@@ -76,6 +76,34 @@ Then, on the VM:
 > makes the destructive behaviour opt-in. If you still want it baked in for a dedicated
 > deploy-only image, do it knowingly on a copy, never on your archived repair-source media.
 
+## Boot-order gotcha: the CD won't boot on a VM that already has Windows
+
+**Symptom:** you set the CD/DVD first in the VM's boot order, power on, and instead of the installer
+you get **no "Press any key to boot from CD…" prompt at all** — the VM boots straight into the
+existing install (or just sits there). You wipe the disk (e.g. gparted, `diskpart clean`) and *then*
+the install starts. Infuriating, and it looks like the ISO is broken. It isn't.
+
+**Why:** on **UEFI**, firmware doesn't just walk a device order — it walks **NVRAM boot entries**.
+The moment Windows is installed it writes a `Windows Boot Manager` entry, and that entry outranks
+the CD/DVD **even when you've put the CD-ROM first in the firmware's device list**. So the firmware
+boots the existing OS off disk and never tries the CD — which is exactly why you never see the
+keypress prompt (the prompt only appears when the firmware actually hands off to the optical boot
+sector). Wiping the partition table deletes the EFI bootloader, the competing entry disappears, and
+the firmware finally falls through to the DVD.
+
+**This image wipes disk 0 on boot anyway,** so its intended target is a *blank* disk — and a blank
+disk has no competing boot entry, so the CD boots first-try with no drama. Two ways to avoid the
+manual wipe on repeat redeploys:
+
+- **Cleanest for a throwaway VM:** delete the virtual disk and add a fresh empty one (or just
+  delete and recreate the VM). Nothing on disk to compete → the CD boots immediately.
+- **Keep the disk:** on power-on use **ESXi → VM Options → Boot Options → Force EFI setup** (applies
+  to the next boot only), then in the EFI **Boot Manager** pick the DVD-ROM explicitly. One-time, no
+  wipe. You can also raise the **Boot Delay** (e.g. 5000 ms) to give yourself time to catch it.
+
+Rule of thumb: a **blank/detached disk** sidesteps this entirely; a disk carrying a prior Windows
+install will always fight you until you either wipe it or force the boot device.
+
 ## Do you even need to slipstream Win11? (your "thinking out loud")
 
 Fair question, and the answer is **probably not, for a lab** — with one correction to the premise.

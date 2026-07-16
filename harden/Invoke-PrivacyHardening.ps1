@@ -418,7 +418,7 @@ if ($H.RemoveOneDrive) {
     Info '[RemoveOneDrive] auto-install off for new profiles + sync policy off'
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
     Invoke-WithDefaultHive {
-        try { Remove-ItemProperty -Path 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDriveSetup' -ErrorAction SilentlyContinue; Info '  removed Default-user OneDriveSetup Run entry' } catch {}
+        try { Remove-ItemProperty -Path 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDriveSetup' -ErrorAction SilentlyContinue; Info '  removed Default-user OneDriveSetup Run entry' } catch { Write-Verbose "no Default-user OneDriveSetup Run entry to remove: $($_.Exception.Message)" }
     }
 }
 

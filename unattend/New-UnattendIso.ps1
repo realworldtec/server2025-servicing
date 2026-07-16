@@ -61,7 +61,7 @@ try {
     @("@echo off", $line, "exit /b %ERRORLEVEL%") | Set-Content -Path $cmd -Encoding Ascii
     & $env:SystemRoot\System32\cmd.exe /c "`"$cmd`""
     if ($LASTEXITCODE -ne 0) { throw "oscdimg failed ($LASTEXITCODE)." }
-    Write-Host "Built: $OutputIso  (attach as a 2nd CD-ROM next to the install ISO; set VM firmware = EFI)"
+    Write-Host "Built: $OutputIso  (New-UnattendIso v$ScriptVersion; attach as a 2nd CD-ROM next to the install ISO; set VM firmware = EFI)"
 }
 finally {
     Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue

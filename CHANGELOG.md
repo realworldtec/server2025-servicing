@@ -6,7 +6,38 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Win11 answer file boot loop (`0x80220001`).** `unattend/autounattend-Win11.xml` placed the
+  specialize-pass hardening trigger (`<RunSynchronous>`) under the **`Microsoft-Windows-Shell-Setup`**
+  component, which does not define that element. Windows Setup rejected the whole answer file at the
+  specialize pass ("Setting is not defined in this component") and boot-looped the installer with
+  "The computer restarted unexpectedly." `RunSynchronous` belongs to **`Microsoft-Windows-Deployment`**
+  (specialize/auditUser, system context) — moved it into its own Deployment component; `ComputerName`
+  stays under Shell-Setup. Confirmed the file is now well-formed and the trigger sits in the
+  documented-correct component. (Diagnosis corrected mid-investigation: the loop was NOT the v1.4.0
+  hardening — the setuperr.log showed the hardening never ran; the answer file failed to load first.)
+
 ### Added
+- **Quality gate (→ v1.6.0): answer-file (XML) validation stage.** AST + PSSA never look at XML, so
+  the `0x80220001` answer file above shipped on a green gate. New 5th stage validates every `*.xml`:
+  well-formedness, and for unattend files (root `<unattend>`) that `RunSynchronous`/`RunAsynchronous`
+  appear **only** under `Microsoft-Windows-Setup` or `Microsoft-Windows-Deployment`, and that every
+  `<settings pass="...">` names a real configuration pass. A misplaced trigger or a typo'd pass now
+  **fails the gate** instead of a boot loop. Detection logic verified against the real file (clean)
+  and synthetic broken files (caught). Also silenced three pre-existing PSScriptAnalyzer warnings
+  (empty catch blocks in the hardening + deploy scripts, an unused version var in `New-UnattendIso.ps1`).
+- **`New-DeployableIso.ps1` (→ v1.2.0): source-currency guard.** The remaster reuses the newest
+  patched ISO on disk, but if a fresh build for the product hadn't finished when it ran (e.g.
+  launched mid-nightly, before the Win11 job), that "newest" source can predate the latest
+  Patch-Tuesday LCU — and Windows Update pulls the missing cumulative on first boot (observed on the
+  first ESXi deploy). New metadata-only guard (it never downloads): reads the source ISO's `.json`
+  manifest for the LCU it was built with (`LcuKB`/`BuiltAt`), asks the Catalog what the current LCU
+  is — reusing the profile's `LcuQuery`/`LcuInclude` so Catalog naming still lives only in the
+  config, and mirroring the slipstream's KB-descending tie-break — and **WARNS (never blocks)** when
+  they differ, naming both KBs and the fix (`Invoke-MediaJobs.ps1 -Jobs <product>` then re-run). If
+  the Catalog is unreachable it falls back to a Patch-Tuesday calendar check (warn if the source was
+  built before the last Patch Tuesday). `-SkipCurrencyCheck` silences it. Runs after
+  `Start-Transcript`, so the warning lands in the deploy log.
 - **Privacy hardening (→ v1.4.0): second-pass hardening from the first ESXi boot test.** After
   booting the v1.3.0 deploy ISO, the following gaps were closed. New toggles (all default on):
   **`DisableSearchAccounts`** (Windows Search "find my content" across Microsoft + Work/School

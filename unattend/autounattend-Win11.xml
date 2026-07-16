@@ -190,7 +190,18 @@
                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
       <!-- "*" = a random valid computer name. Set a fixed name if you prefer. -->
       <ComputerName>*</ComputerName>
+    </component>
 
+    <!-- RunSynchronous lives on Microsoft-Windows-DEPLOYMENT, NOT Shell-Setup. Putting it under
+         Shell-Setup makes Setup reject the whole answer file at specialize with 0x80220001
+         ("Setting is not defined in this component") and loop forever. This is the documented
+         home for a specialize-pass command (system context):
+         learn.microsoft.com/.../unattend/microsoft-windows-deployment-runsynchronous -->
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
       <!-- Run the privacy hardening HERE, in specialize, as SYSTEM, BEFORE OOBE/first logon.
            This is the universal trigger: it needs no AutoLogon and works on machines with an OEM
            key in firmware (the Acer), where SetupComplete.cmd would be SKIPPED. It is SELF-

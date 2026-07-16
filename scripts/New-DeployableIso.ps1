@@ -41,6 +41,10 @@
 .PARAMETER IncludeUnattend  Bake autounattend.xml at the ISO ROOT (fully unattended, WIPES DISK 0
                           on boot). Default OFF. Use for a dedicated deploy image only.
 .PARAMETER UnattendPath   Answer file to bake when -IncludeUnattend. Default ..\unattend\autounattend-Win11.xml.
+.PARAMETER SkipCurrencyCheck  Skip the metadata-only currency guard that WARNS when the chosen
+                          source ISO was built with an LCU older than the current catalog LCU
+                          (i.e. a fresh build had not finished when this ran). Warning only - it
+                          never blocks the build.
 .PARAMETER KeepWork       Keep the work dir after building (default: delete it).
 
 .EXAMPLE
@@ -77,11 +81,12 @@ param(
     [string]$FirefoxSetup,
     [string]$FirefoxUrl  = 'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US',
     [switch]$NoFirefox,
+    [switch]$SkipCurrencyCheck,   # skip the "is the source built with the current LCU?" warning
     [switch]$KeepWork
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.2.0'
 function Get-TS { '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # ---- Locate oscdimg (ADK) -----------------------------------------------------
@@ -104,6 +109,61 @@ function Mount-IsoGetDrive {
     if (-not $vol.DriveLetter) { $vol = Get-DiskImage -ImagePath $Path | Get-Volume }
     if (-not $vol.DriveLetter) { throw "Could not resolve a drive letter for $Path" }
     return [string]$vol.DriveLetter
+}
+
+# ---- Currency guard helpers (metadata-only; never download) -------------------
+# Ask the Microsoft Update Catalog what the CURRENT LCU KB is for a product, using the SAME
+# search strings the slipstream uses (from the profile). This is a read-only second consumer of
+# the profile's Catalog naming - it parses the results page and returns a KB string, nothing more.
+# Returns $null if the Catalog can't be reached (caller then falls back to the date heuristic).
+# The row pick mirrors the slipstream's proven logic, incl. the KB-descending tie-break within a
+# month (so a month carrying both an out-of-band CU and the Patch-Tuesday LCU resolves correctly).
+function Get-CurrentCatalogLcuKb {
+    param([string]$Query, [string]$IncludeRegex, [string]$PreferRegex)
+    if (-not $Query -or -not $IncludeRegex) { return $null }
+    $uri = 'https://www.catalog.update.microsoft.com/Search.aspx?q=' + [uri]::EscapeDataString($Query)
+    $html = $null
+    for ($a = 1; $a -le 3 -and -not $html; $a++) {
+        try { $html = (Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 60).Content }
+        catch { if ($a -lt 3) { Start-Sleep -Seconds 8 } }
+    }
+    if (-not $html) { return $null }
+    $guidRx  = [regex]'(?i)<input[^>]*\bid="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"'
+    $titleRx = [regex]'(?is)<a\b[^>]*>(.*?)</a>'
+    $rows = @()
+    foreach ($chunk in ($html -split '(?i)<tr[\s>]')) {
+        if (-not $guidRx.Match($chunk).Success) { continue }
+        $t = $titleRx.Match($chunk)
+        if (-not $t.Success) { continue }
+        $title = ($t.Groups[1].Value -replace '<[^>]+>','' -replace '&amp;','&' -replace '\s+',' ').Trim()
+        if (-not $title -or $title -notmatch $IncludeRegex) { continue }
+        $ym = if ($title -match '^\s*(\d{4})-(\d{2})') { '{0}-{1}' -f $Matches[1], $Matches[2] } else { '0000-00' }
+        $rows += [pscustomobject]@{ Title = $title; YearMonth = $ym }
+    }
+    if ($PreferRegex) { $pref = @($rows | Where-Object { $_.Title -match $PreferRegex }); if ($pref.Count -gt 0) { $rows = $pref } }
+    if ($rows | Where-Object { $_.Title -match 'x64' }) { $rows = $rows | Where-Object { $_.Title -match 'x64' } }
+    if (-not $rows) { return $null }
+    $pick = $rows |
+            Sort-Object YearMonth, @{ Expression = { if ($_.Title -match 'KB(\d+)') { [int]$Matches[1] } else { 0 } } } -Descending |
+            Select-Object -First 1
+    if ($pick.Title -match 'KB(\d+)') { return "KB$($Matches[1])" }
+    return $null
+}
+
+# Most recent Patch Tuesday (2nd Tuesday of the month) on/before $AsOf - the offline fallback:
+# if the Catalog is unreachable we can't know the current KB, but a source built before the last
+# Patch Tuesday is very likely a cycle behind.
+function Get-LastPatchTuesday {
+    param([datetime]$AsOf = (Get-Date))
+    $second = {
+        param($y, $m)
+        $first = [datetime]::new($y, $m, 1)
+        $offset = ([int][DayOfWeek]::Tuesday - [int]$first.DayOfWeek + 7) % 7
+        $first.AddDays($offset + 7)
+    }
+    $pt = & $second $AsOf.Year $AsOf.Month
+    if ($AsOf -lt $pt) { $prev = $AsOf.AddMonths(-1); $pt = & $second $prev.Year $prev.Month }
+    return $pt.Date
 }
 
 # ---- Load the product profile -------------------------------------------------
@@ -164,7 +224,7 @@ trap {
     Write-Warning "$(Get-TS): FATAL: $($_.Exception.Message)"
     if ($Script:MountedImg) { Dismount-WindowsImage -Path $Script:MountedImg -Discard -ErrorAction SilentlyContinue | Out-Null }
     if ($Script:MountedISO) { Dismount-DiskImage -ImagePath $Script:MountedISO -ErrorAction SilentlyContinue | Out-Null }
-    try { Stop-Transcript | Out-Null } catch { }
+    try { Stop-Transcript | Out-Null } catch { Write-Verbose 'transcript already stopped' }
     exit 1
 }
 
@@ -176,6 +236,52 @@ Write-Output "$(Get-TS): Harden      : $(if ($NoHarden) { 'NO (image injection s
 Write-Output "$(Get-TS): Firefox     : $(if ($NoFirefox) { 'NO' } elseif ($FirefoxSetup) { "supplied: $FirefoxSetup" } else { 'download latest offline installer + bake in' })"
 Write-Output "$(Get-TS): Unattend    : $(if ($IncludeUnattend) { "BAKED AT ROOT (wipes disk 0!) - $UnattendPath" } else { 'not baked (attach separately)' })"
 Write-Output "$(Get-TS): Output ISO  : $OutputIso"
+
+# ---- 0. Currency guard: is the chosen source built with the CURRENT LCU? ------
+# The remaster faithfully reuses the newest patched ISO on disk. If a fresh build for THIS product
+# had not finished when it ran (e.g. launched mid-nightly, before the Win11 job), that "newest"
+# source can predate the latest Patch-Tuesday LCU - and Windows Update then pulls the missing
+# cumulative on first boot. This check is metadata-only (it never downloads): it reads the source
+# ISO's manifest for the LCU it was built with, asks the Catalog what the current LCU is, and WARNS
+# (never blocks) if they differ. Pass -SkipCurrencyCheck to silence it.
+if (-not $SkipCurrencyCheck) {
+    $mf = $null
+    $mfPath = "$SourceIso.json"
+    if (Test-Path $mfPath) {
+        try { $mf = Get-Content -LiteralPath $mfPath -Raw | ConvertFrom-Json } catch { $mf = $null }
+    }
+    $srcKb = if ($mf -and $mf.LcuKB) { [string]$mf.LcuKB } else { $null }
+    if ($srcKb -and $srcKb -notmatch '^(?i)kb') { $srcKb = "KB$srcKb" }   # normalize to KB#######
+    $srcBuilt = if ($mf -and $mf.BuiltAt) { [string]$mf.BuiltAt } else { 'unknown' }
+    Write-Output ("$(Get-TS): Source built : LCU {0}, at {1}" -f ($(if ($srcKb) { $srcKb } else { 'unknown' })), $srcBuilt)
+
+    $curKb = $null
+    try { $curKb = Get-CurrentCatalogLcuKb -Query ([string]$P.LcuQuery) -IncludeRegex ([string]$P.LcuInclude) -PreferRegex ([string]$P.PreferRegex) }
+    catch { $curKb = $null }
+
+    if ($curKb) {
+        if ($srcKb -and ($srcKb -ieq $curKb)) {
+            Write-Output "$(Get-TS): Currency OK  : source carries the current catalog LCU ($curKb)."
+        } elseif ($srcKb) {
+            Write-Warning "$(Get-TS): CURRENCY WARNING - source was built with $srcKb, but the current catalog LCU is $curKb."
+            Write-Warning "$(Get-TS): This deploy image will be a patch cycle behind; Windows Update will pull $curKb on first boot."
+            Write-Warning "$(Get-TS): To ship current media: build $Product first (.\scripts\Invoke-MediaJobs.ps1 -Jobs $Product), then re-run this."
+        } else {
+            Write-Warning "$(Get-TS): CURRENCY WARNING - current catalog LCU is $curKb, but the source manifest has no LCU KB to compare. Cannot confirm the source is current."
+        }
+    } else {
+        # Catalog unreachable -> Patch-Tuesday calendar fallback.
+        $lastPT   = Get-LastPatchTuesday
+        $builtDt  = [datetime]::MinValue
+        $haveDate = ($mf -and $mf.BuiltAt) -and [datetime]::TryParse([string]$mf.BuiltAt, [ref]$builtDt)
+        if ($haveDate -and $builtDt.Date -lt $lastPT) {
+            Write-Warning ("$(Get-TS): CURRENCY WARNING - Catalog unreachable; source was built {0}, BEFORE the last Patch Tuesday ({1})." -f $builtDt.ToString('yyyy-MM-dd'), $lastPT.ToString('yyyy-MM-dd'))
+            Write-Warning "$(Get-TS): A newer LCU has very likely shipped since. Rebuild $Product and re-run to be safe."
+        } else {
+            Write-Warning ("$(Get-TS): Currency UNVERIFIED - Catalog unreachable and could not confirm source currency (built {0}, last Patch Tuesday {1}). Proceeding." -f ($(if ($haveDate) { $builtDt.ToString('yyyy-MM-dd') } else { 'unknown' })), $lastPT.ToString('yyyy-MM-dd'))
+        }
+    }
+}
 
 # ---- 1. Copy the patched media tree to a writable dir -------------------------
 Write-Output "$(Get-TS): Mounting source ISO..."

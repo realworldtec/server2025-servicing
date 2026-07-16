@@ -5,7 +5,7 @@
     cannot have verified its own syntax.
 
 .DESCRIPTION
-    Four layers, fastest first:
+    Five layers, fastest first:
 
       1. AST PARSE  - the real PowerShell parser. Catches every syntax error: a comment that
                       swallowed a closing brace, a try/catch piped into Out-File, an unclosed
@@ -19,6 +19,15 @@
                       NOTHING - silently), and Server2025.IsoPrefix is unchanged (the detector
                       globs it to archive the monthly build). This is the file operators edit,
                       so a bad edit must fail HERE, in seconds - not four hours into a build.
+      5. ANSWER FILES - validates every *.xml: it must be well-formed, and for a Windows
+                      unattend file (root <unattend>), RunSynchronous/RunAsynchronous may appear
+                      ONLY under the Microsoft-Windows-Setup or Microsoft-Windows-Deployment
+                      components, and every <settings pass="..."> must name a real pass. A
+                      RunSynchronous placed under Microsoft-Windows-Shell-Setup is well-formed XML
+                      but an INVALID answer file: Setup rejects it at specialize with 0x80220001
+                      ("Setting is not defined in this component") and boot-loops the installer.
+                      (Real bug: the Win11 answer file shipped with the hardening trigger under
+                      Shell-Setup; AST/PSSA don't look at XML, so a green gate let it through.)
 
     Project rules currently enforced:
       * Stop-Transcript appearing BOTH inside a finally block and outside it. A redundant
@@ -56,7 +65,7 @@
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
 
 .NOTES
-    Version : 1.5.1
+    Version : 1.6.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -81,7 +90,7 @@ Write-Host ("=" * 70)
 # 1. AST parse (the real parser)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "[1/4] PowerShell AST parse" -ForegroundColor Cyan
+Write-Host "[1/5] PowerShell AST parse" -ForegroundColor Cyan
 foreach ($f in $files) {
     $tokens = $null
     $errors = $null
@@ -107,7 +116,7 @@ foreach ($f in $files) {
 # 2. PSScriptAnalyzer
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "[2/4] PSScriptAnalyzer" -ForegroundColor Cyan
+Write-Host "[2/5] PSScriptAnalyzer" -ForegroundColor Cyan
 if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
     if ($InstallAnalyzer) {
         Write-Host "  installing PSScriptAnalyzer (CurrentUser)..."
@@ -140,7 +149,7 @@ if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
 # 3. Project-specific rules (the bugs that actually bit us)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "[3/4] Project rules" -ForegroundColor Cyan
+Write-Host "[3/5] Project rules" -ForegroundColor Cyan
 
 # A stage that prints NOTHING when it passes is indistinguishable from a stage that silently
 # did nothing - a skipped file, a `continue` that swallowed everything, a rule that never fired
@@ -367,7 +376,7 @@ if ($rulesFindings -eq 0) {
 # This is the file operators hand-edit, so a bad edit must fail HERE - in seconds - and not
 # four hours into a build. Same validation the slipstream applies at startup.
 Write-Host ""
-Write-Host "[4/4] Product config" -ForegroundColor Cyan
+Write-Host "[4/5] Product config" -ForegroundColor Cyan
 $cfg = Join-Path $Path 'config\Products.psd1'
 if (-not (Test-Path $cfg)) {
     Write-Host "  FAIL  config\Products.psd1 not found - the slipstream cannot run without it." -ForegroundColor Red
@@ -448,6 +457,72 @@ if (-not (Test-Path $cfg)) {
             Write-Host "        Changing it makes the scheduled task silently archive nothing." -ForegroundColor Red
         }
     }
+}
+
+# ---------------------------------------------------------------------------
+# 5. Answer files (unattend XML): well-formedness + component/pass sanity
+# ---------------------------------------------------------------------------
+# AST + PSSA never look at XML, so a schema-invalid answer file ships on a green gate. The bug that
+# motivated this stage: the specialize hardening trigger (<RunSynchronous>) sat under
+# Microsoft-Windows-Shell-Setup, which does not define it. Windows Setup rejected the whole file at
+# the specialize pass with 0x80220001 ("Setting is not defined in this component") and boot-looped
+# the installer. RunSynchronous/RunAsynchronous belong ONLY to Microsoft-Windows-Setup (windowsPE)
+# or Microsoft-Windows-Deployment (specialize/auditUser).
+Write-Host ""
+Write-Host "[5/5] Answer files (XML)" -ForegroundColor Cyan
+$xmlFiles = @(Get-ChildItem -Path $Path -Recurse -Filter *.xml -File |
+              Where-Object { $_.FullName -notlike '*\.git\*' })
+$validPasses = @('windowsPE','offlineServicing','generalize','specialize','auditSystem','auditUser','oobeSystem')
+$runOwners   = @('Microsoft-Windows-Setup','Microsoft-Windows-Deployment')
+$xmlScanned  = 0
+$xmlFindings = 0
+if ($xmlFiles.Count -eq 0) {
+    Write-Host "  ok    no XML files to check" -ForegroundColor Green
+}
+foreach ($x in $xmlFiles) {
+    $xmlScanned++
+    $doc = New-Object System.Xml.XmlDocument
+    try {
+        $doc.Load($x.FullName)
+    } catch {
+        $failures++; $xmlFindings++
+        Write-Host ("  FAIL  {0} - not well-formed XML: {1}" -f $x.Name, $_.Exception.Message) -ForegroundColor Red
+        continue
+    }
+    # Apply the unattend rules only to actual answer files (root <unattend>). Any other XML is just
+    # checked for well-formedness above.
+    if (-not $doc.DocumentElement -or $doc.DocumentElement.LocalName -ne 'unattend') {
+        Write-Host ("  ok    {0} (well-formed; not an unattend file)" -f $x.Name) -ForegroundColor Green
+        continue
+    }
+    $fileBad = 0
+    # (a) every <settings pass="..."> must name a real configuration pass (a typo is ignored by
+    #     Setup - the whole pass silently never runs).
+    foreach ($s in @($doc.GetElementsByTagName('settings'))) {
+        $pass = $s.GetAttribute('pass')
+        if ($pass -and ($validPasses -notcontains $pass)) {
+            $failures++; $xmlFindings++; $fileBad++
+            Write-Host ("  FAIL  {0}: <settings pass=`"{1}`"> is not a real pass." -f $x.Name, $pass) -ForegroundColor Red
+            Write-Host  ("        Valid: {0}." -f ($validPasses -join ', ')) -ForegroundColor Red
+        }
+    }
+    # (b) RunSynchronous / RunAsynchronous only under Microsoft-Windows-Setup or -Deployment.
+    foreach ($comp in @($doc.GetElementsByTagName('component'))) {
+        $cname = $comp.GetAttribute('name')
+        $runNodes = @($comp.GetElementsByTagName('RunSynchronous')) + @($comp.GetElementsByTagName('RunAsynchronous'))
+        if ($runNodes.Count -gt 0 -and ($runOwners -notcontains $cname)) {
+            $failures++; $xmlFindings++; $fileBad++
+            Write-Host ("  FAIL  {0}: Run(a)synchronous under component '{1}'." -f $x.Name, $cname) -ForegroundColor Red
+            Write-Host  "        That element belongs to Microsoft-Windows-Setup or -Deployment only." -ForegroundColor Red
+            Write-Host  "        Setup rejects the file at specialize (0x80220001) and boot-loops the installer." -ForegroundColor Red
+        }
+    }
+    if ($fileBad -eq 0) {
+        Write-Host ("  ok    {0} (well-formed unattend; components + passes valid)" -f $x.Name) -ForegroundColor Green
+    }
+}
+if ($xmlFindings -gt 0) {
+    Write-Host ("  {0} finding(s) across {1} XML file(s)." -f $xmlFindings, $xmlScanned) -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------------------
