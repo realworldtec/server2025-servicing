@@ -107,11 +107,14 @@ param(
     # Acrobat Pro DC: EMBED the ISO into the image; the target mounts + installs it offline.
     [string]$AcrobatIso,          # build-host path to AcrobatDC.iso to bake in; omit => Acrobat skipped
     [switch]$NoAcrobat,
+    # SSH: bake an identity keypair + authorized_keys into the image; installed at first logon.
+    # Default => repo config\ssh\windows. Populate that folder (gitignored) to enable; empty => skipped.
+    [string]$SshKeySource,
     [switch]$KeepWork
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.5.0'   # config-driven from config\Deploy.psd1 (switches override)
+$ScriptVersion = '1.6.0'   # config-driven from config\Deploy.psd1 (switches override); + SSH key baking
 function Get-TS { '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 # ---- Locate oscdimg (ADK) -----------------------------------------------------
@@ -233,6 +236,9 @@ $cfgOneDrive = if ($dp.ContainsKey('RemoveOneDrive')) { [bool]$dp.RemoveOneDrive
 # ---- Load the product profile -------------------------------------------------
 if (-not $ConfigPath)   { $ConfigPath   = Join-Path $repo 'config\Products.psd1' }
 if (-not $HardenDir)    { $HardenDir    = Join-Path $repo 'harden' }
+if (-not $SshKeySource) { $SshKeySource = Join-Path $repo 'config\ssh\windows' }
+# Enable SSH baking only if a real private key is present in the source (the .sample alone => skip).
+$sshKeyDir = if (Test-Path (Join-Path $SshKeySource 'id_ed25519')) { $SshKeySource } else { $null }
 if (-not $UnattendPath) { $UnattendPath = Join-Path $repo 'unattend\autounattend-Win11.xml' }
 if (-not $OfficeConfig) { $OfficeConfig = Join-Path $repo 'office\proplus2024.xml' }
 if (-not (Test-Path $ConfigPath)) { throw "Config not found: $ConfigPath" }
@@ -304,6 +310,7 @@ Write-Output "$(Get-TS): Firefox     : $(if ($NoFirefox) { 'NO' } elseif ($Firef
 Write-Output "$(Get-TS): Office      : $(if ($NoOffice) { 'NO' } elseif ($OfficeOdt -or $OfficeOdtUrl) { 'download current bits + BAKE IN (offline install at first logon)' } else { 'no -OfficeOdt/-OfficeOdtUrl -> not baked' })"
 Write-Output "$(Get-TS): Acrobat     : $(if ($NoAcrobat -or -not $AcrobatIso) { 'NO (no -AcrobatIso)' } else { "EMBED $AcrobatIso (offline install at first logon)" })"
 Write-Output "$(Get-TS): Unattend    : $(if ($IncludeUnattend) { "BAKED AT ROOT (wipes disk 0!) - $UnattendPath" } else { 'not baked (attach separately)' })"
+Write-Output "$(Get-TS): SSH keys    : $(if ($sshKeyDir) { "BAKE from $sshKeyDir (private key in image!) + enable sshd" } else { 'NO (no id_ed25519 in config\ssh\windows)' })"
 Write-Output "$(Get-TS): Output ISO  : $OutputIso"
 
 # ---- 0. Currency guard: is the chosen source built with the CURRENT LCU? ------
@@ -525,6 +532,18 @@ if ((-not $NoHarden) -or $ffLocal) {
             Copy-Item $acrobatLocal (Join-Path $filesDir 'AcrobatDC.iso') -Force
             Write-Output "$(Get-TS): Embedded Acrobat -> \Windows\Setup\Files\AcrobatDC.iso"
         }
+        # SSH keys: identity keypair (outbound) + authorized_keys (inbound), installed at first logon.
+        # This bakes a PRIVATE key into the deploy image - the deploy ISO is a private, self-contained
+        # artifact (like Office/Acrobat); the source lives in gitignored config\ssh\windows.
+        if ($sshKeyDir) {
+            $sshDst = Join-Path $filesDir 'ssh'
+            New-Item -ItemType Directory -Path $sshDst -Force | Out-Null
+            foreach ($f in @('authorized_keys', 'id_ed25519', 'id_ed25519.pub')) {
+                $s = Join-Path $sshKeyDir $f
+                if (Test-Path $s) { Copy-Item $s (Join-Path $sshDst $f) -Force }
+            }
+            Write-Output "$(Get-TS): Injected SSH keys -> \Windows\Setup\Files\ssh\ (installed + sshd enabled at first logon)"
+        }
         # postinstall.config.json: edit-free feature flags Invoke-PostInstall.ps1 reads at first logon.
         if (-not $NoHarden) {
             $officeCfgTarget = if ($officeSrcReady) { 'C:\Windows\Setup\Files\Office\' + (Split-Path $OfficeConfig -Leaf) } else { '' }
@@ -539,9 +558,12 @@ if ((-not $NoHarden) -or $ffLocal) {
                 OfficeConfig   = $officeCfgTarget
                 InstallAcrobat = [bool]$acrobatLocal
                 AcrobatSource  = $acrobatTarget
+                InstallSshKeys = [bool]$sshKeyDir
+                SshUser        = 'Admin'
+                SshEnableServer = $true
             }
             Set-Content -Path (Join-Path $scriptsDir 'postinstall.config.json') -Value ($piConfig | ConvertTo-Json) -Encoding UTF8
-            Write-Output "$(Get-TS): Wrote postinstall.config.json (Office=$($piConfig.InstallOffice), Acrobat=$($piConfig.InstallAcrobat), Firefox=$($piConfig.InstallFirefox))"
+            Write-Output "$(Get-TS): Wrote postinstall.config.json (Office=$($piConfig.InstallOffice), Acrobat=$($piConfig.InstallAcrobat), Firefox=$($piConfig.InstallFirefox), Ssh=$($piConfig.InstallSshKeys))"
         }
     } finally {
         Dismount-WindowsImage -Path $mnt -Save | Out-Null

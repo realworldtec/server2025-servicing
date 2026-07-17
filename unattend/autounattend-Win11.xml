@@ -176,7 +176,7 @@
                xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
       <!-- "*" = a random valid computer name. Set a fixed name if you prefer. -->
-      <ComputerName>*</ComputerName>
+      <ComputerName>%%COMPUTERNAME%%</ComputerName>
     </component>
 
     <!-- RunSynchronous lives on Microsoft-Windows-DEPLOYMENT, NOT Shell-Setup. Putting it under
@@ -241,13 +241,13 @@
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>Admin</Name>
+            <Name>%%ADMINUSER%%</Name>
             <Group>Administrators</Group>
-            <DisplayName>Admin</DisplayName>
+            <DisplayName>%%ADMINDISPLAYNAME%%</DisplayName>
             <!-- CHANGE-ME: set a real password. PlainText true stores it in clear in this file;
                  that is fine for a throwaway lab file you keep private, not for anything shared. -->
             <Password>
-              <Value>ChangeMe!2026</Value>
+              <Value>$$ADMINPWD$$</Value>
               <PlainText>true</PlainText>
             </Password>
           </LocalAccount>

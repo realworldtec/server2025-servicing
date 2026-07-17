@@ -31,6 +31,15 @@ DownloadDialog_*.html
 unattend/autounattend-Win11.xml
 !unattend/autounattend-Win11.xml.sample
 
+# ---- Secrets: SSH key material. Only the *.sample templates are committed; real keys never are. ----
+config/ssh/windows/authorized_keys
+config/ssh/windows/id_rwtgit
+config/ssh/windows/id_rwtgit.pub
+config/ssh/ubuntu/authorized_keys
+config/ssh/ubuntu/id_rwtgit
+config/ssh/ubuntu/id_rwtgit.pub
+!config/ssh/**/*.sample
+
 # ---- OS / editor cruft ----
 .DS_Store
 Thumbs.db

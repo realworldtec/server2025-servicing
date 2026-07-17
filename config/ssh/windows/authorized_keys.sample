@@ -1,0 +1,6 @@
+# INBOUND: public keys allowed to SSH INTO the Windows box.
+# Copy this file to  authorized_keys  (no .sample) in this folder and paste your PUBLIC key(s),
+# one per line. Because the deploy account is an administrator, these are installed to
+# %ProgramData%\ssh\administrators_authorized_keys at first logon (Windows sshd ignores ~/.ssh
+# for admins). The real file is .gitignore'd.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5REPLACE_WITH_YOUR_INBOUND_PUBLIC_KEY you@host

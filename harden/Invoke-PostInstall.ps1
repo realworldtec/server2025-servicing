@@ -34,7 +34,7 @@
     on a live box: .\Invoke-PostInstall.ps1 -Force
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.1.0
     Project : server2025-servicing (companion to harden/Invoke-PrivacyHardening.ps1)
     License : MIT
     Windows PowerShell 5.1. SYSTEM or elevated. Reboot afterwards.
@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 
 # =====================================================================================
 #  Helpers (defined before any use)
@@ -98,6 +98,9 @@ $cfg = [ordered]@{
     OfficeConfig     = 'C:\Windows\Setup\Files\Office\proplus2024.xml'
     InstallAcrobat   = $true
     AcrobatSource    = ''    # UNC/local path to Acrobat's setup.exe, its folder, or an .iso. Empty => skip.
+    InstallSshKeys   = $false # gate; New-DeployableIso.ps1 sets $true when keys are staged in the image.
+    SshUser          = 'Admin' # local account whose ~/.ssh gets the OUTBOUND identity keypair. Match the answer file's LocalAccount.
+    SshEnableServer  = $true  # install OpenSSH Server + enable sshd for INBOUND (admin keys go to ProgramData).
 }
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
@@ -239,6 +242,73 @@ if ($cfg.SetNetworkPrivate) {
 # but nothing guarantees it. reagentc /enable is idempotent and makes sure WinRE is registered.
 Info '[WinRE] reagentc /enable (belt-and-braces)'
 try { Start-Process -FilePath "$env:SystemRoot\System32\reagentc.exe" -ArgumentList '/enable' -Wait -WindowStyle Hidden } catch { Warn "  reagentc /enable failed: $($_.Exception.Message)" }
+
+# =====================================================================================
+#  2d. SSH - place keys + (optionally) stand up OpenSSH Server
+# =====================================================================================
+# Keys are staged by New-DeployableIso.ps1 at C:\Windows\Setup\Files\ssh\ (authorized_keys,
+# id_ed25519, id_ed25519.pub). We place the OUTBOUND identity keypair in the user's ~/.ssh, and -
+# because this account is an ADMINISTRATOR - the INBOUND authorized_keys must go to
+# %ProgramData%\ssh\administrators_authorized_keys (Windows sshd IGNORES ~/.ssh for admins) with ACLs
+# restricted to Administrators+SYSTEM, or key auth silently fails. Every step is best-effort (warns,
+# never throws) so an SSH hiccup can't block the rest of first-logon. Staged private key is wiped after.
+if ($cfg.InstallSshKeys) {
+    Info '[SSH] placing keys + configuring OpenSSH'
+    $sshStage = 'C:\Windows\Setup\Files\ssh'
+    if (-not (Test-Path $sshStage)) {
+        Warn "  no staged keys at $sshStage - skipping."
+    } else {
+        $user = [string]$cfg.SshUser
+        # OUTBOUND identity keypair -> the user's ~/.ssh
+        $prof = Join-Path $env:SystemDrive "Users\$user"
+        if (-not (Test-Path $prof)) {
+            Warn "  user profile not found: $prof - skipping user-side keys."
+        } else {
+            try {
+                $dotssh = Join-Path $prof '.ssh'
+                New-Item -ItemType Directory -Path $dotssh -Force | Out-Null
+                foreach ($f in @('id_ed25519', 'id_ed25519.pub', 'authorized_keys')) {
+                    $s = Join-Path $sshStage $f
+                    if (Test-Path $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $dotssh $f) -Force; Info "  placed $f -> $dotssh" }
+                }
+                # StrictModes-safe ACLs: user + SYSTEM only, no inheritance.
+                & icacls.exe $dotssh /inheritance:r /grant:r "${user}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' 2>&1 | Out-Null
+                $priv = Join-Path $dotssh 'id_ed25519'
+                if (Test-Path $priv) { & icacls.exe $priv /inheritance:r /grant:r "${user}:F" 'SYSTEM:F' 2>&1 | Out-Null }
+                Info "  ~/.ssh secured for $user"
+            } catch { Warn "  user-side key placement failed: $($_.Exception.Message)" }
+        }
+        # INBOUND server
+        if ($cfg.SshEnableServer) {
+            try {
+                Info '  installing OpenSSH.Server capability'
+                Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction Stop | Out-Null
+            } catch { Warn "  OpenSSH.Server add failed (needs Features-on-Demand source / internet): $($_.Exception.Message)" }
+            try {
+                Set-Service -Name sshd -StartupType Automatic -ErrorAction Stop
+                Start-Service -Name sshd -ErrorAction Stop
+                Set-Service -Name 'ssh-agent' -StartupType Automatic -ErrorAction SilentlyContinue
+                if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
+                    New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue | Out-Null
+                }
+                # Admin inbound keys MUST live here, not in ~/.ssh.
+                $ak = Join-Path $sshStage 'authorized_keys'
+                if (Test-Path $ak) {
+                    $pd = Join-Path $env:ProgramData 'ssh'
+                    New-Item -ItemType Directory -Path $pd -Force | Out-Null
+                    $aak = Join-Path $pd 'administrators_authorized_keys'
+                    Copy-Item -LiteralPath $ak -Destination $aak -Force
+                    & icacls.exe $aak /inheritance:r /grant:r 'Administrators:F' 'SYSTEM:F' 2>&1 | Out-Null
+                    Info '  wrote administrators_authorized_keys (admin inbound)'
+                }
+                Info '  sshd enabled + started'
+            } catch { Warn "  sshd enable failed: $($_.Exception.Message)" }
+        }
+        # Don't leave the PRIVATE key sitting in the setup folder on the deployed box.
+        try { Remove-Item -LiteralPath $sshStage -Recurse -Force -ErrorAction Stop; Info '  wiped staged keys' }
+        catch { Warn "  could not wipe staged keys at $sshStage : $($_.Exception.Message)" }
+    }
+}
 
 # =====================================================================================
 #  3. Firefox - silent install from the baked offline installer

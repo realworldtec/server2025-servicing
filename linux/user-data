@@ -40,19 +40,51 @@ autoinstall:
 
   # ---- primary user ----
   identity:
-    hostname: acer-ubuntu
-    realname: Bert
-    username: bert
+    hostname: rwt-acer
+    realname: Real World Tec
+    username: rwt
     # HASHED password (SHA-512 crypt). NEVER put a cleartext password here.
     # Generate a hash, then paste it in place of the placeholder below:
     #     openssl passwd -6
     #   (or)  mkpasswd --method=SHA-512
     # The value below is a NON-WORKING placeholder - REPLACE IT before first use.
-    password: "$6$REPLACE_ME_WITH$a.real.sha512.crypt.hash.from.openssl.passwd.-6.REPLACE"
+    password: "$6$12Ls2uxQSE/Rb58K$Su4IyYkfDqb6u8eyiVQOWmJ/fZuKaUEzMHcJMSmtfu6IlWAPbxZeO.OCgWYE9HJEpPm7r5sSxhJuBzSo38PET1"
 
-  # ---- SSH: off by default for a laptop; flip to true if you want remote access ----
+  # ---- SSH server + INBOUND keys (so you can SSH INTO this box) ----
   ssh:
-    install-server: false
+    install-server: true
+    allow-pw: true                     # keep password login as a fallback; set false to force keys
+    authorized-keys:
+      # PASTE your PUBLIC key(s) allowed to log in. Replace the placeholder line(s).
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJkJpEiwk1qSl9oMF/aSa/xm4VbwZ6F1/zqTzjZUAqd9 realworldtec@gmail.com"
+
+  # ---- OUTBOUND identity keypair, written into the user's ~/.ssh on first boot ----
+  # This is cloud-init config applied to the INSTALLED system (not the installer). It drops your
+  # private+public key into ~/.ssh so this machine can SSH OUT (git, servers). Replace BOTH blocks
+  # with your real key material. Keep the private key secret - this file lives on the stick, not git.
+  user-data:
+    write_files:
+      - path: /home/rwt/.ssh/id_rwtgit
+        owner: 'rwt:rwt'
+        permissions: '0600'
+        defer: true                    # write after the 'bert' user exists
+        content: |
+          -----BEGIN OPENSSH PRIVATE KEY-----
+          b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABAWMRiWsG
+          FYBOuQKBc0ae2/AAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIJkJpEiwk1qSl9oM
+          F/aSa/xm4VbwZ6F1/zqTzjZUAqd9AAAAoDJQ2ZlaiVhLLxXa3Hl8twrPlR9fGeDxHG9+wZ
+          N2V8EoFWFpxO9xooiZxB8M1TjvUbiL5Rv7cpD+KgtZ8/sKmyAOZLvU9FHHS+SykVnkzfkG
+          S6hVPqiygSPIPayHN94Cni9o+8uAi5wH0Isb0RSOaAgIWfIr5f83NoxlcItMHhDATKo3D3
+          lUM9hNPDagqJ0Zjsaz9JwNsvq7+3EvUWv0n50=
+          -----END OPENSSH PRIVATE KEY-----
+      - path: /home/rwt/.ssh/id_rwtgit.pub
+        owner: 'rwt:rwt'
+        permissions: '0644'
+        defer: true
+        content: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJkJpEiwk1qSl9oMF/aSa/xm4VbwZ6F1/zqTzjZUAqd9 realworldtec@gmail.com'
+    runcmd:
+      # Belt-and-braces: guarantee dir/ownership/perms sshd's StrictModes requires.
+      - [ bash, -c, "install -d -m 700 -o rwt -g rwt /home/rwt/.ssh && chmod 600 /home/rwt/.ssh/id_rwtgit && chmod 644 /home/rwt/.ssh/id_rwtgit.pub && chown -R rwt:rwt /home/rwt/.ssh" ]
 
   # ---- network: DHCP is automatic. Use the USB-Ethernet you tested during install;
   #      Wi-Fi during autoinstall is unreliable. Nothing to configure here for DHCP. ----

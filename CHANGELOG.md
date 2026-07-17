@@ -7,6 +7,22 @@ All notable changes to this project are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **SSH keys on both builds + `docs/VENTOY.md`.** Each machine gets an identity keypair (outbound) in
+  the user's `~/.ssh` **and** `authorized_keys` (inbound), with the SSH server enabled. You supply the
+  key material; only `.sample` placeholders are committed, real keys are `.gitignore`d.
+  - Windows: drop keys in `config/ssh/windows/` → `New-DeployableIso.ps1` (v1.6.0) bakes them to
+    `\Windows\Setup\Files\ssh\` → `Invoke-PostInstall.ps1` (v1.1.0) places the identity keypair in
+    `C:\Users\Admin\.ssh` (locked ACLs), installs + enables OpenSSH Server, writes inbound keys to
+    `%ProgramData%\ssh\administrators_authorized_keys` (Windows `sshd` ignores `~/.ssh` for admins),
+    and wipes the staged private key. Gated on a real key being present; a new `-SshKeySource` param
+    overrides the default folder. **Windows SSH path is UNVERIFIED** (runtime OpenSSH/ACL behavior; PS
+    gate must be run) — see `docs/SSH-KEYS.md` for the VM test plan.
+  - Ubuntu: keys live inline in `linux/user-data` (`ssh: authorized-keys` for inbound; `write_files`
+    for the identity keypair), placeholders stubbed.
+  - `docs/VENTOY.md`: full reference on the one-stick Ventoy setup (creation, layout, `ventoy.json`,
+    `auto_install`, variable expansion, Secure Boot, deploy flow, Kali live, maintenance, gotchas).
+  - `docs/SSH-KEYS.md`: how to generate/place the keys, the admin-`authorized_keys` gotcha, and the
+    verification steps.
 - **Ubuntu 26.04 LTS dual-boot side (`linux/`).** Installs Ubuntu into the 128 GB reserve on the
   same single Ventoy stick as the Windows golden ISO. Four files:
   - `linux/user-data` — Subiquity/cloud-init autoinstall. Automates locale, identity (SHA-512
