@@ -33,11 +33,16 @@ Two ways out:
 
 - **Bypasses** TPM / Secure Boot / RAM / storage / CPU checks (LabConfig, windowsPE pass).
 - **Wipes disk 0** (via a `diskpart` script in windowsPE) and creates a clean UEFI/GPT layout with a
-  **dedicated recovery partition**: EFI 512 MB + MSR 16 MB + Windows (balance) + Recovery ~1 GB (last,
-  hidden, correct type GUID + GPT attributes). Portable to any disk size. **It destroys disk 0 with
-  no prompt** — only attach it to a VM (or machine) you mean to install fresh. *(A plain
-  `DiskConfiguration` can't set the recovery partition's GPT attributes, which is why this uses
-  diskpart; `InstallTo` targets partition 3 = Windows.)*
+  **dedicated recovery partition** plus **128 GB left unallocated at the end for a Linux dual-boot**:
+  EFI 512 MB + MSR 16 MB + Windows (balance) + Recovery 1026 MB + 128 GB free (recovery is hidden, with
+  the correct type GUID + GPT attributes, and sits immediately after C: so WinRE servicing can still
+  grow it). Portable to any disk size. **It destroys disk 0 with no prompt** — only attach it to a VM
+  (or machine) you mean to install fresh. *(A plain `DiskConfiguration` can't set the recovery
+  partition's GPT attributes, which is why this uses diskpart; `InstallTo` targets partition 3 =
+  Windows.)* The 128 GB reserve is set by two numbers in the diskpart line (`shrink desired=132098
+  minimum=132096` and `create partition primary size=1026`); the comment above that line documents how
+  to resize it or remove it (for a Windows-only box, use `shrink desired=1026 minimum=1024` and drop
+  `size=1026`).
 - **Selects the edition by NAME** (`/IMAGE/NAME` = `Windows 11 Pro` by default, matched to the Pro
   KMS GVLK `W269N-WFGWX-YVC9B-4J6C9-T83GX`; keep the two on the same edition), *not* by
   index — so it keeps working whether your media is **trimmed** (renumbered) or **full**. This

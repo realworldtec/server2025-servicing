@@ -1,16 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  *** THIS IS THE COMMITTED SAMPLE. It carries a PLACEHOLDER password and is safe to keep in git. ***
-
-  To use it (once):
-      copy autounattend-Win11.xml.sample  ->  autounattend-Win11.xml   (same folder)
-  then edit the REAL autounattend-Win11.xml and set a real admin password (search: CHANGE-ME).
-  The real autounattend-Win11.xml is .gitignore'd, so your credentials never enter git, and the
-  golden ISO is built WITHOUT baking it in (Deploy.psd1: IncludeUnattend = $false) - you carry the
-  answer file on a SEPARATE tiny "config" ISO instead (build it with New-UnattendIso.ps1). That
-  keeps the cleartext password out of both git AND the widely-distributed golden USB.
-
   ================================================================================================
+  *** THIS IS THE COMMITTED SAMPLE (autounattend-Win11.xml.sample). Safe to keep in git. ***
+  It carries a PLACEHOLDER admin password (search: CHANGE-ME). To use it, once:
+      copy autounattend-Win11.xml.sample  ->  autounattend-Win11.xml     (same folder)
+  then edit the REAL autounattend-Win11.xml and set a real admin password. The real file is
+  .gitignore'd, so your credentials never enter git; the golden ISO is built WITHOUT baking it in
+  (Deploy.psd1: IncludeUnattend = $false) - you carry the answer file on a SEPARATE tiny "config"
+  ISO (build it with New-UnattendIso.ps1). Keeps the cleartext password out of git AND the golden USB.
+  ================================================================================================
+
   autounattend-Win11.xml  -  unattended Windows 11 install for an ESXi VM with NO vTPM.
 
   WHAT IT DOES
@@ -18,8 +17,9 @@
       check, so Setup does NOT stop on "This PC can't run Windows 11" (no TPM 2.0, no Secure
       Boot, insufficient RAM). This is the same bypass Rufus applies to USB media.
     * Wipes disk 0 (via diskpart) and lays down a clean UEFI/GPT layout with a DEDICATED recovery
-      partition: EFI 512 MB + MSR 16 MB + Windows (balance) + Recovery ~1 GB (last, hidden). Portable
-      to any disk size (Windows takes the balance, then 1 GB is shrunk off the end for WinRE).
+      partition AND 128 GB left unallocated for a Linux dual-boot: EFI 512 MB + MSR 16 MB +
+      Windows (balance) + Recovery 1026 MB + 128 GB free. Portable to any disk size. See the diskpart
+      comment below to change or remove the 128 GB reserve.
     * Installs the edition selected BY NAME (default: Windows 11 Pro) - name, not index,
       so this file keeps working whether the media is trimmed (renumbered) or full.
     * Skips OOBE: no Microsoft account, no "let's connect you to a network" - creates a LOCAL
@@ -106,13 +106,21 @@
              <DiskConfiguration> block because pure DiskConfiguration cannot set the recovery
              partition's GPT attributes (hidden + platform-required). RunSynchronous in windowsPE
              runs BEFORE the image is applied, so InstallTo (PartitionID 3) targets the Windows
-             partition this creates. Portable to any disk size: Windows takes the balance, then we
-             shrink 1 GB off the END for WinRE.
-             Layout:  1=EFI(512 MB FAT32)  2=MSR(16 MB)  3=Windows(NTFS, balance)  4=Recovery(~1 GB).
+             partition this creates. Portable to any disk size: Windows takes the balance, minus a
+             1026 MB recovery partition AND 128 GB left UNALLOCATED at the end for a Linux dual-boot.
+             Layout: 1=EFI(512 MB)  2=MSR(16 MB)  3=Windows(balance)  4=Recovery(1026 MB)  +128 GB free.
+
+             TWO NUMBERS control the Linux reserve (in the diskpart line below):
+               shrink desired=132098 minimum=132096   = 131072 (128 GB) + 1026 (recovery)
+               create partition primary size=1026      = the recovery partition (fixed, so the
+                                                          reserve is what's left over)
+             To change the reserve to N GB:  shrink desired = (N*1024 + 1026), minimum = (N*1024 + 1024).
+             For NO reserve (Windows takes all): shrink desired=1026 minimum=1024, and drop 'size=1026'
+             from the recovery 'create partition primary' so it takes the freed 1 GB.
              *** WIPES DISK 0. *** -->
         <RunSynchronousCommand wcm:action="add">
           <Order>7</Order>
-          <Path>cmd /c (echo select disk 0&amp;echo clean&amp;echo convert gpt&amp;echo create partition efi size=512&amp;echo format quick fs=fat32 label=System&amp;echo create partition msr size=16&amp;echo create partition primary&amp;echo shrink desired=1026 minimum=1024&amp;echo format quick fs=ntfs label=Windows&amp;echo create partition primary&amp;echo format quick fs=ntfs label=Recovery&amp;echo set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"&amp;echo gpt attributes=0x8000000000000001)&gt;X:\diskpart.txt</Path>
+          <Path>cmd /c (echo select disk 0&amp;echo clean&amp;echo convert gpt&amp;echo create partition efi size=512&amp;echo format quick fs=fat32 label=System&amp;echo create partition msr size=16&amp;echo create partition primary&amp;echo shrink desired=132098 minimum=132096&amp;echo format quick fs=ntfs label=Windows&amp;echo create partition primary size=1026&amp;echo format quick fs=ntfs label=Recovery&amp;echo set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"&amp;echo gpt attributes=0x8000000000000001)&gt;X:\diskpart.txt</Path>
           <Description>Write the diskpart layout script (EFI/MSR/Windows/Recovery)</Description>
         </RunSynchronousCommand>
         <RunSynchronousCommand wcm:action="add">

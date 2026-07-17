@@ -6,7 +6,36 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **Ubuntu 26.04 LTS dual-boot side (`linux/`).** Installs Ubuntu into the 128 GB reserve on the
+  same single Ventoy stick as the Windows golden ISO. Four files:
+  - `linux/user-data` — Subiquity/cloud-init autoinstall. Automates locale, identity (SHA-512
+    hashed password, placeholder to replace), `linux-firmware` + `os-prober`, and `late-commands`
+    that enable os-prober + `update-grub` so GRUB lists Windows. **Storage is deliberately
+    `interactive-sections: [storage]`** — the one destructive step is done by hand so the automation
+    can never reformat disk 0 and wipe Windows. No `storage:` block ships (verified).
+  - `linux/meta-data` — required NoCloud companion (cloud-init won't start the datasource without it).
+  - `linux/ventoy.json` — `auto_install` array mapping BOTH the Windows golden ISO and the Ubuntu ISO
+    to their templates, so one stick drives both installs.
+  - `linux/README-dualboot.md` — runbook: Windows-first ordering, stick layout, password-hash
+    generation, the interactive-storage click-through (reuse the existing 512 MB ESP unformatted,
+    create ext4 `/` in the free space, never touch Windows/Recovery), GRUB/os-prober, UEFI boot
+    order, Fast-Startup and RTC-clock gotchas. **UNVERIFIED — reviewed draft, not a booted run.**
+
 ### Changed
+- **Answer file: reserve 128 GB unallocated for a Linux dual-boot.** After live-validating Ubuntu
+  26.04 on the target (Acer Lunar Lake — GPU acceleration, Wi-Fi, audio, Bluetooth, suspend all
+  working), the diskpart layout now leaves **128 GB unallocated at the end of disk 0** for a later
+  Linux install. Two numbers do it: `shrink desired=132098 minimum=132096` (128 GB + the 1026 MB
+  recovery) and `create partition primary size=1026` (recovery is now a **fixed** size, so the
+  reserve is what remains). New layout: **EFI 512 + MSR 16 + Windows (balance) + Recovery 1026 MB +
+  128 GB free**. Recovery still sits immediately after C: (correct for WinRE servicing) with its
+  type GUID + GPT attributes intact; `InstallTo` still targets partition 3. The comment above the
+  diskpart line documents how to resize the reserve (`shrink desired = N*1024 + 1026`) or remove it
+  for a Windows-only box. Applied to both `unattend/autounattend-Win11.xml` and its committed
+  `.sample`; ESXi doc updated. **UNVERIFIED until a real hardware install** — disk layout is the
+  highest-blast-radius part of the pipeline.
+
 - **Answer file: dedicated ~1 GB recovery partition (was WinRE-on-C:).** `autounattend-Win11.xml`
   now partitions disk 0 with a `diskpart` script in the windowsPE pass (runs before the image is
   applied) instead of a `<DiskConfiguration>` block, producing the modern best-practice layout:

@@ -1,0 +1,78 @@
+#cloud-config
+# =====================================================================================
+# Ubuntu 26.04 LTS - autoinstall (Subiquity/cloud-init) user-data
+# Dual-boot install ALONGSIDE Windows 11 on the Acer Copilot+ (Intel Core Ultra 9 288V,
+# "Lunar Lake"). Installs into the 128 GB left UNALLOCATED by the Windows answer file
+# (unattend/autounattend-Win11.xml).
+#
+# HOW IT'S DELIVERED
+#   - Ventoy Auto Installation plugin (see linux/ventoy.json), OR
+#   - a NoCloud volume/partition labelled 'cidata' holding THIS file (as user-data) plus
+#     linux/meta-data. Boot the Ubuntu ISO with the kernel arg  autoinstall  added.
+#
+# *** STORAGE IS INTENTIONALLY LEFT INTERACTIVE. ***
+#   This file automates EVERYTHING except disk partitioning. You partition BY HAND in the
+#   installer - into the 128 GB free space, reusing the existing EFI partition - so there
+#   is ZERO chance the automation reformats disk 0 and wipes Windows. A fully-automated
+#   storage layout that "preserves Windows" is the one piece that cannot be verified
+#   without booting the exact hardware, and getting it wrong destroys the Windows install.
+#   The click-through for the storage screen is in linux/README-dualboot.md.
+#
+# BEFORE YOU USE IT
+#   1. Set 'timezone' below.
+#   2. Replace the PLACEHOLDER password hash under 'identity' (instructions inline).
+#   3. Adjust hostname/username/realname to taste.
+# =====================================================================================
+autoinstall:
+  version: 1
+
+  # Stop ONLY on the storage screen; every other section runs unattended. If you later
+  # validate a fully-automated layout on this exact machine, remove 'storage' from here
+  # and add a 'storage:' section - but not before (see the note above).
+  interactive-sections:
+    - storage
+
+  # ---- localisation ----
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  timezone: America/New_York          # <-- SET YOUR TIMEZONE (e.g. America/Chicago)
+
+  # ---- primary user ----
+  identity:
+    hostname: acer-ubuntu
+    realname: Bert
+    username: bert
+    # HASHED password (SHA-512 crypt). NEVER put a cleartext password here.
+    # Generate a hash, then paste it in place of the placeholder below:
+    #     openssl passwd -6
+    #   (or)  mkpasswd --method=SHA-512
+    # The value below is a NON-WORKING placeholder - REPLACE IT before first use.
+    password: "$6$REPLACE_ME_WITH$a.real.sha512.crypt.hash.from.openssl.passwd.-6.REPLACE"
+
+  # ---- SSH: off by default for a laptop; flip to true if you want remote access ----
+  ssh:
+    install-server: false
+
+  # ---- network: DHCP is automatic. Use the USB-Ethernet you tested during install;
+  #      Wi-Fi during autoinstall is unreliable. Nothing to configure here for DHCP. ----
+
+  # ---- extra packages on top of the base desktop ----
+  packages:
+    - linux-firmware        # Wi-Fi 7 / Bluetooth / GPU firmware blobs for Lunar Lake
+    - os-prober             # lets GRUB detect the Windows Boot Manager
+
+  # ---- don't let the installer self-update mid-run (keeps the build deterministic) ----
+  refresh-installer:
+    update: false
+
+  # ---- wire up dual-boot in the freshly-installed system ----
+  # late-commands run in the live installer with the new system mounted at /target.
+  late-commands:
+    # Ubuntu ships os-prober DISABLED since 20.04; enable it so GRUB adds a Windows entry.
+    - echo 'GRUB_DISABLE_OS_PROBER=false' >> /target/etc/default/grub
+    # Regenerate the GRUB menu inside the target so "Windows Boot Manager" appears.
+    - curtin in-target --target=/target -- update-grub
+
+  # ---- reboot when finished (pull the USB at the "please remove medium" prompt) ----
+  shutdown: reboot
