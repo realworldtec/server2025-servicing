@@ -53,9 +53,20 @@ ISO from the profile. This is the "point-in-time golden USB" button.
 
 > Long by design: it can download ~3 GB of Office and build a ~12–13 GB ISO. Walk away.
 
+> **Credential-safe deploy (default):** the golden profiles set `IncludeUnattend = $false`, so the
+> answer file (which holds the cleartext admin password) is **not** baked into the golden USB. Build
+> the answer file onto a separate tiny **config ISO** and attach both to the target:
+> ```powershell
+> copy .\unattend\autounattend-Win11.xml.sample .\unattend\autounattend-Win11.xml   # once; set a real password
+> .\scripts\Build-GoldenImage.ps1                 # golden ISO (no creds baked)
+> .\unattend\New-UnattendIso.ps1                  # tiny config ISO carrying autounattend.xml
+> ```
+> The real `autounattend-Win11.xml` is `.gitignore`d; the `.sample` is the committed reference. The
+> golden alone is a non-destructive installer — the config ISO is what makes it wipe + run unattended.
+
 ---
 
-## `Slipstream-WindowsMedia.ps1` — the builder (v3.4.x)
+## `Slipstream-WindowsMedia.ps1` — the builder (v3.5.x)
 
 Services ONE product's RTM media into a patched, bootable ISO. Probes the catalog, downloads the
 LCU + dynamic updates, applies them checkpoint-aware, trims/verifies, archives. ~4 hours for a full
@@ -151,6 +162,8 @@ Everything below is a **profile field** (in `Deploy.psd1`) *and* a switch (for o
 | `-OfficeOdt <setup.exe>` | Local ODT `setup.exe`. Build **downloads the current Office bits** with it and **bakes them in** (offline install). Omit both this and `-OfficeOdtUrl` → no Office. |
 | `-OfficeOdtUrl <url>` | Instead of a local ODT, download the ODT self-extractor (link from download page id=49117) at build. |
 | `-OfficeConfig <xml>` | ODT config (default `..\office\proplus2024.xml` = ProPlus + Visio, `SourcePath` = baked source). |
+| `-OfficeCache <path>` | Where Office bits are **cached between builds** (default `<BasePath>\OfficeCache`). Repeated builds reuse it — **no CDN re-download**. |
+| `-RefreshOffice` / `-OfficeMaxAgeHours <n>` | Force a cache refresh now / auto-refresh once the cache is older than N hours (default 24). |
 | `-NoOffice` | Don't download/bake/enable Office. |
 | `-AcrobatIso <path>` | Build-host `AcrobatDC.iso` to **embed** in the image; target mounts + installs it offline. Omit → Acrobat skipped. |
 | `-NoAcrobat` | Don't embed/enable Acrobat. |
@@ -162,7 +175,8 @@ Everything below is a **profile field** (in `Deploy.psd1`) *and* a switch (for o
 > at first logon** via `Invoke-PostInstall.ps1` (self-removing task). **All app bits are baked at
 > build time**, so Office + Acrobat install **offline**; the target needs internet only for Windows
 > Update / KMS activation. Evidence: `C:\ProgramData\PrivacyHardening\postinstall_*.log`.
-> Build cost: the deploy ISO grows to ~12-13 GB and the build downloads ~3 GB of Office each run.
+> Build cost: the deploy ISO is ~12-13 GB. The ~3 GB Office download is **cached** (`<BasePath>\OfficeCache`),
+> so only the first build of the day (or after `-RefreshOffice`) hits the CDN; the rest reuse it.
 
 > **Currency guard:** on run it reads the source ISO's manifest LCU and compares to the catalog's
 > current LCU. `Currency OK` = current; a `CURRENCY WARNING` means the source predates the latest

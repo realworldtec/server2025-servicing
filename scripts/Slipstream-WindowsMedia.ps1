@@ -155,7 +155,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'   # dramatically speeds up Save/Copy operations
-$ScriptVersion          = '3.4.1'
+$ScriptVersion          = '3.5.0'   # catalog reachability: TCP connection-gate + backoff
 function Get-TS { return '{0:yyyy-MM-dd HH:mm:ss}' -f [DateTime]::Now }
 
 
@@ -773,14 +773,45 @@ function Save-CatalogUpdate {
     return Save-CatalogPick -Pick $pick -Destination $Destination
 }
 
-# Lightweight reachability probe (decides catalog vs. pre-staged fallback).
-function Test-Catalog {
+# A cheap TCP connect (fast, unambiguous) that GATES the expensive HTTP request. The catalog's
+# common failure is a connection-level flap ("Unable to connect to the remote server"); probing the
+# socket first tells us in ~5s whether the network path is even up, instead of eating a 60s HTTP
+# timeout per try. Standard non-blocking connect-with-timeout via BeginConnect/WaitOne.
+function Test-TcpPort {
+    param([string]$HostName, [int]$Port = 443, [int]$TimeoutMs = 5000)
+    $client = [System.Net.Sockets.TcpClient]::new()
     try {
-        Invoke-Retry -Retries 4 -DelaySeconds 15 -What 'Catalog reachability' -Script {
-            Invoke-Web -Uri 'https://www.catalog.update.microsoft.com/' -TimeoutSec 60 | Out-Null
-        }
+        $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+        $client.EndConnect($iar)
         return $true
-    } catch { Write-Warning "$(Get-TS): Catalog unreachable ($($_.Exception.Message)); will use pre-staged packages if present."; return $false }
+    } catch { return $false }
+    finally { $client.Close() }
+}
+
+# Reachability GATE (decides catalog vs. pre-staged fallback). Rides out a transient flap with
+# exponential-ish backoff (~6 min total) instead of the old flat 4x15s that usually gave up before
+# a 2-3 min blip cleared. Each round: cheap TCP gate first; only on TCP success do we confirm the
+# HTTP endpoint actually answers before committing the build to the online path.
+function Test-Catalog {
+    $catHost = 'www.catalog.update.microsoft.com'
+    $delays  = @(0, 10, 20, 30, 45, 60, 90, 120)   # seconds between rounds; sum ~= 6.25 min
+    for ($i = 0; $i -lt $delays.Count; $i++) {
+        if ($delays[$i] -gt 0) {
+            Write-Host "$(Get-TS): Catalog not reachable yet - backing off $($delays[$i])s (round $($i + 1)/$($delays.Count))..."
+            Start-Sleep -Seconds $delays[$i]
+        }
+        if (-not (Test-TcpPort -HostName $catHost -Port 443 -TimeoutMs 5000)) { continue }   # network path down - keep waiting
+        try {
+            Invoke-Web -Uri "https://$catHost/" -TimeoutSec 30 | Out-Null
+            if ($i -gt 0) { Write-Host "$(Get-TS): Catalog reachable (recovered on round $($i + 1))." }
+            return $true
+        } catch {
+            Write-Host "$(Get-TS): TCP up but HTTP failed ($($_.Exception.Message)) - retrying."
+        }
+    }
+    Write-Warning "$(Get-TS): Catalog unreachable after ~6 min of retries; will use pre-staged packages if present."
+    return $false
 }
 
 # Printed when the Catalog can't be reached and packages aren't pre-staged. The build

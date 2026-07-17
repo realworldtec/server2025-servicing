@@ -7,6 +7,15 @@ All notable changes to this project are documented here. Format follows
 ## [Unreleased]
 
 ### Changed
+- **Answer file: dedicated ~1 GB recovery partition (was WinRE-on-C:).** `autounattend-Win11.xml`
+  now partitions disk 0 with a `diskpart` script in the windowsPE pass (runs before the image is
+  applied) instead of a `<DiskConfiguration>` block, producing the modern best-practice layout:
+  **EFI 512 MB + MSR 16 MB + Windows (balance) + Recovery ~1 GB, last and hidden**, with the correct
+  recovery type GUID (`de94bba4-…`) and GPT attributes (`0x8000000000000001`) — which a plain
+  `DiskConfiguration` cannot set. Portable to any disk size (Windows takes the balance, then 1 GB is
+  shrunk off the end for WinRE). `InstallTo` targets partition 3. The 1 GB recovery size follows the
+  post-KB5034441 guidance (older ~500 MB partitions were too small to service WinRE). Validate on
+  the first hardware install — disk layout is the highest-blast-radius part of the pipeline.
 - **Two-phase deploy hardening: specialize = policy only, first logon = stateful + installs.** The
   appx debloat kept surviving because Remove-Appx* is unreliable during Setup's specialize pass
   (the Appx stack isn't up). Split responsibilities:
@@ -22,6 +31,13 @@ All notable changes to this project are documented here. Format follows
     `C:\ProgramData\PrivacyHardening\postinstall_*.log`.
 
 ### Added
+- **Office source cache (no more re-downloading ~3 GB every build).** `New-DeployableIso.ps1`
+  keeps the downloaded Office bits in a persistent cache (`<BasePath>\OfficeCache`) with a state
+  file, exactly like the ISO builds' ALREADY-BUILT guard. Repeated builds **reuse the cache with no
+  CDN call**; it refreshes only when the cache is missing, older than `-OfficeMaxAgeHours` (default
+  24), or `-RefreshOffice` is passed — and even then ODT's `/download` is incremental (delta only).
+  Six builds in a day now cost one download and five instant reuses. New params/fields:
+  `-OfficeCache`, `-OfficeMaxAgeHours`, `-RefreshOffice` (also as `Deploy.psd1` profile fields).
 - **Config-driven golden image + one-command build.** The deploy side is now declarative, matching
   how `Products.psd1` drives the slipstream:
   - **`config/Deploy.psd1`** (new) holds golden-image profiles — source product, edition, unattend,

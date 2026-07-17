@@ -35,7 +35,7 @@
     # Baked into media: SetupComplete.cmd calls this as SYSTEM. No parameters.
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.5.0
     Project : server2025-servicing (companion to unattend/autounattend-Win11.xml)
     License : MIT
     Windows PowerShell 5.1 (in-box). Run elevated. Reboot afterwards.
@@ -80,7 +80,9 @@ $H = @{
     DisableStartRecommendations = $true    # Start "Recommended" section + tips/shortcuts recommendations off
     DisableRecommendationsAndOffers = $true # Settings "recommendations & offers" + suggested content off
     DisableLanguageListAccess   = $true    # stop websites reading your language list (HttpAcceptLanguageOptOut)
+    ExplorerDevView             = $true    # show file extensions / hidden / system files / full path / run-as-different-user
     ShowFullAppsList            = $true    # Start "All apps" as a FLAT LIST, not the categorised grid
+    CleanStartPins              = $true    # replace default Start pins (Xbox/LinkedIn/WhatsApp/...) with a clean layout
     DisableProxyAutoDetect      = $true    # "Automatically detect settings" / WPAD auto-proxy off
     DisableEdgeNags             = $true    # Edge first-run, startup boost, personalization telemetry off
     RemoveOneDrive              = $true    # policy: stop OneDrive auto-install (FULL uninstall runs in post-install)
@@ -131,19 +133,38 @@ function Set-Reg {
     } catch { Warn "  reg FAILED $Path :: $Name - $($_.Exception.Message)" }
 }
 
-# Run a scriptblock with the Default user hive loaded at HKU\PH_Default. Inside the block,
-# write to 'Registry::HKEY_USERS\PH_Default\...'. Used so NEW profiles inherit per-user tweaks.
+# Default user hive, mounted ONCE at HKU\PH_Default and reused. The old design load/unloaded it in
+# every section - and if a SINGLE unload failed to release its handle, every LATER 'reg load' failed
+# ("key already loaded") and every subsequent per-user write silently no-op'd. That's the root cause
+# of per-user settings (language list, Explorer view, ...) not sticking. Now: mount once, write many,
+# Dismount-DefaultHive once at the very end.
+$Script:DefaultHiveLoaded = $false
+function Mount-DefaultHive {
+    if ($Script:DefaultHiveLoaded) { return $true }
+    $dat = 'C:\Users\Default\NTUSER.DAT'
+    if (-not (Test-Path $dat)) { Warn "Default hive not found ($dat) - per-user (Default) settings skipped."; return $false }
+    & reg.exe load 'HKU\PH_Default' $dat 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        # A stale mount from a crashed prior run - clear it and retry once.
+        & reg.exe unload 'HKU\PH_Default' 2>&1 | Out-Null
+        & reg.exe load   'HKU\PH_Default' $dat 2>&1 | Out-Null
+    }
+    if ($LASTEXITCODE -eq 0) { $Script:DefaultHiveLoaded = $true; return $true }
+    Warn "Could not load Default hive (reg load exit $LASTEXITCODE) - per-user (Default) settings skipped."
+    return $false
+}
+function Dismount-DefaultHive {
+    if (-not $Script:DefaultHiveLoaded) { return }
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()   # release handles or unload fails
+    & reg.exe unload 'HKU\PH_Default' 2>&1 | Out-Null
+    $Script:DefaultHiveLoaded = $false
+}
+# Run a scriptblock with the Default hive mounted (write to 'Registry::HKEY_USERS\PH_Default\...').
+# Call sites are unchanged; only the mount lifetime moved (see above).
 function Invoke-WithDefaultHive {
     param([scriptblock]$Script)
-    $dat = 'C:\Users\Default\NTUSER.DAT'
-    if (-not (Test-Path $dat)) { Warn "Default hive not found ($dat) - skipping per-user (Default) settings."; return }
-    try {
-        & reg.exe load 'HKU\PH_Default' $dat | Out-Null
-        & $Script
-    } catch { Warn "Default-hive block failed: $($_.Exception.Message)" }
-    finally {
-        [gc]::Collect(); [gc]::WaitForPendingFinalizers()   # release handles or unload fails
-        & reg.exe unload 'HKU\PH_Default' | Out-Null
+    if (Mount-DefaultHive) {
+        try { & $Script } catch { Warn "Default-hive block failed: $($_.Exception.Message)" }
     }
 }
 
@@ -315,7 +336,17 @@ if ($H.DisableSearchAccounts) {
 # =====================================================================================
 if ($H.DisableWidgets) {
     Info '[DisableWidgets] widgets off'
+    # The Dsh policy key has a restrictive ACL that blocks even elevated Admin (only SYSTEM can
+    # write it - so this succeeds at the SYSTEM-run specialize/post-install, and just warns when
+    # you test standalone as Admin). Set-Reg swallows the failure; the per-user TaskbarDa below is
+    # the reliable route that removes the Widgets button regardless.
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
+    Invoke-WithDefaultHive {
+        Set-Reg 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 0
+    }
+    if ($AlsoCurrentUser) {
+        Set-Reg 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 0
+    }
 }
 
 # =====================================================================================
@@ -362,7 +393,9 @@ if ($H.DisableStartRecommendations) {
     Info '[DisableStartRecommendations] Start "Recommended" section + tips off'
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'HideRecommendedSection' 1
     Set-Reg 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start' 'HideRecommendedSection' 1
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Education' 'IsEducationEnvironment' 1
+    # NOTE: do NOT set Education\IsEducationEnvironment here - that flips the WHOLE device into an
+    # education SKU (SetEduPolicies: Store/search/Start/default-app side effects). HideRecommendedSection
+    # above is the correct, targeted control.
     Invoke-WithDefaultHive {
         $adv = 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
         Set-Reg $adv 'Start_IrisRecommendations' 0   # "recommendations for tips, shortcuts, new apps"
@@ -385,6 +418,23 @@ if ($H.DisableStartRecommendations) {
 if ($H.ShowFullAppsList) {
     Info '[ShowFullAppsList] Start All-apps = flat list (category grid off)'
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'HideCategoryView' 1
+}
+
+# =====================================================================================
+#  8c2. Strip the default Start PINS (Xbox / LinkedIn / WhatsApp / Solitaire / etc.)
+# =====================================================================================
+# Those are default *pins*, not just apps - the appx debloat removes the apps but the PINS persist
+# (which is why they were still on Start). 24H2+ (KB5062660) added the ConfigureStartPins policy: a
+# single-line JSON pinnedList that REPLACES the default layout. Empty list = clean Start; you pin
+# what you want after (applyOnce lets your later changes stick). Set on both the Explorer policy and
+# the PolicyManager device node so it takes on Pro.
+if ($H.CleanStartPins) {
+    Info '[CleanStartPins] replacing default Start pins with a clean (empty) layout'
+    $pinsJson = '{"pinnedList":[]}'
+    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'ConfigureStartPins' $pinsJson 'String'
+    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'ConfigureStartPins_ProviderSet' 1
+    Set-Reg 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start' 'ConfigureStartPins' $pinsJson 'String'
+    Set-Reg 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start' 'ConfigureStartPins_ProviderSet' 1
 }
 
 # =====================================================================================
@@ -433,6 +483,30 @@ if ($H.DisableLanguageListAccess) {
     if ($AlsoCurrentUser) {
         Set-Reg 'Registry::HKEY_CURRENT_USER\Control Panel\International\User Profile' 'HttpAcceptLanguageOptOut' 1
     }
+}
+
+# =====================================================================================
+#  8g. File Explorer - developer-friendly defaults (show extensions/hidden/system/full path)
+# =====================================================================================
+# You asked for these ON. Per-user (Default hive), plus the machine policy for run-as-different-user.
+if ($H.ExplorerDevView) {
+    Info '[ExplorerDevView] show file extensions / hidden / system / full path'
+    Invoke-WithDefaultHive {
+        $adv = 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+        Set-Reg $adv 'HideFileExt' 0        # show file extensions
+        Set-Reg $adv 'Hidden' 1             # show hidden files
+        Set-Reg $adv 'ShowSuperHidden' 1    # show protected OS (system) files
+        Set-Reg 'Registry::HKEY_USERS\PH_Default\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState' 'FullPath' 1  # full path in title bar
+    }
+    if ($AlsoCurrentUser) {
+        $adv = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+        Set-Reg $adv 'HideFileExt' 0
+        Set-Reg $adv 'Hidden' 1
+        Set-Reg $adv 'ShowSuperHidden' 1
+        Set-Reg 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState' 'FullPath' 1
+    }
+    # "Show option to run as different user in Start" - machine policy.
+    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'ShowRunAsDifferentUserInStart' 1
 }
 
 # =====================================================================================
@@ -546,6 +620,16 @@ if ($H.NeuterEdge) {
     Set-Reg $edge 'ShowMicrosoftRewards' 0
     Set-Reg $edge 'EdgeFollowEnabled' 0
     Set-Reg $edge 'DefaultBrowserSettingEnabled' 0    # stop Edge nagging to be default (Firefox is)
+    # ---- Edge, hardened to your spec (it stays installed; harden it too) ----
+    Set-Reg $edge 'ConfigureDoNotTrack' 1                     # Send "Do Not Track" = ON
+    Set-Reg $edge 'ResolveNavigationErrorsUseWebService' 0    # no web service for nav errors / "suggest similar sites"
+    Set-Reg $edge 'SearchSuggestEnabled' 0                    # no search/site suggestions or Bing trending
+    Set-Reg $edge 'RestoreOnStartup' 1                        # on startup: open tabs from the previous session
+    # Default search engine = Google (Edge managed search provider)
+    Set-Reg $edge 'DefaultSearchProviderEnabled' 1
+    Set-Reg $edge 'DefaultSearchProviderName' 'Google' 'String'
+    Set-Reg $edge 'DefaultSearchProviderSearchURL' 'https://www.google.com/search?q={searchTerms}' 'String'
+    Set-Reg $edge 'DefaultSearchProviderSuggestURL' 'https://www.google.com/complete/search?client=chrome&q={searchTerms}' 'String'
 }
 
 # =====================================================================================
@@ -603,15 +687,6 @@ if ($H.HardenFirefox) {
     Set-Reg "$ff\UserMessaging" 'ExtensionRecommendations' 0
     Set-Reg "$ff\UserMessaging" 'FeatureRecommendations'   0
     Set-Reg "$ff\UserMessaging" 'SkipOnboarding'           1
-    # The FirefoxHome DWORDs above cover the toggles, but the sponsored shortcuts you still saw are
-    # also driven by activity-stream prefs. Lock them off directly via the Preferences policy
-    # (REG_SZ JSON: {"Value":<v>,"Status":"locked"} - "locked" also greys them out in Settings).
-    $pref = "$ff\Preferences"
-    Set-Reg $pref 'browser.newtabpage.activity-stream.showSponsoredTopSites' '{"Value":false,"Status":"locked"}' 'String'
-    Set-Reg $pref 'browser.newtabpage.activity-stream.showSponsored'         '{"Value":false,"Status":"locked"}' 'String'
-    Set-Reg $pref 'browser.newtabpage.activity-stream.feeds.topsites'        '{"Value":false,"Status":"locked"}' 'String'
-    Set-Reg $pref 'browser.newtabpage.activity-stream.feeds.section.topstories' '{"Value":false,"Status":"locked"}' 'String'
-    Set-Reg $pref 'browser.topsites.contile.enabled'                         '{"Value":false,"Status":"locked"}' 'String'
     # ---- Homepage + new windows = blank; startup RESTORES previous session; new tab = blank ----
     # The supported Homepage policy: URL is the homepage, StartPage 'previous-session' = "open
     # previous windows and tabs" on launch. Locked=0 so you can still change it later.
@@ -619,10 +694,19 @@ if ($H.HardenFirefox) {
     Set-Reg "$ff\Homepage" 'StartPage' 'previous-session'   'String'
     Set-Reg "$ff\Homepage" 'Locked'    0
     Set-Reg $ff 'NewTabPage' 0    # new tab = blank page (no Firefox Home)
-    # ---- New-tab weather widget OFF; do NOT auto-launch Firefox at Windows startup ----
-    Set-Reg $pref 'browser.newtabpage.activity-stream.showWeather'        '{"Value":false,"Status":"locked"}' 'String'
-    Set-Reg $pref 'browser.newtabpage.activity-stream.system.showWeather' '{"Value":false,"Status":"locked"}' 'String'
-    Set-Reg $pref 'browser.startup.windowsLaunchOnLogin.enabled'          '{"Value":false,"Status":"locked"}' 'String'
+    # ---- Locked prefs via the Preferences policy ----
+    # *** FORMAT FIX (this is why weather / launch-on-login / sponsored didn't take before): the
+    # Preferences policy in the registry is ONE value named 'Preferences' (REG_MULTI_SZ) holding a
+    # SINGLE JSON object - NOT a 'Preferences' SUBKEY with a value per pref. Firefox silently
+    # ignores the subkey form. JSON must be one line. Covers: sponsored top-sites + stories
+    # ("Support Firefox"), the new-tab Weather widget, auto-launch-at-Windows-startup, and
+    # credit-card / address autofill ("Save and autofill payment info").
+    $prefsJson = '{"browser.newtabpage.activity-stream.showSponsoredTopSites":{"Value":false,"Status":"locked"},"browser.newtabpage.activity-stream.showSponsored":{"Value":false,"Status":"locked"},"browser.newtabpage.activity-stream.feeds.topsites":{"Value":false,"Status":"locked"},"browser.newtabpage.activity-stream.feeds.section.topstories":{"Value":false,"Status":"locked"},"browser.topsites.contile.enabled":{"Value":false,"Status":"locked"},"browser.newtabpage.activity-stream.showWeather":{"Value":false,"Status":"locked"},"browser.newtabpage.activity-stream.system.showWeather":{"Value":false,"Status":"locked"},"browser.startup.windowsLaunchOnLogin.enabled":{"Value":false,"Status":"locked"},"extensions.formautofill.creditCards.enabled":{"Value":false,"Status":"locked"},"extensions.formautofill.addresses.enabled":{"Value":false,"Status":"locked"}}'
+    try {
+        if (-not (Test-Path $ff)) { New-Item -Path $ff -Force | Out-Null }
+        New-ItemProperty -Path $ff -Name 'Preferences' -Value @($prefsJson) -PropertyType MultiString -Force | Out-Null
+        Info '  reg  Firefox\Preferences (single REG_MULTI_SZ JSON: weather/launch/sponsored/autofill locked off)'
+    } catch { Warn "  Firefox Preferences policy failed: $($_.Exception.Message)" }
 }
 
 # =====================================================================================
@@ -669,6 +753,9 @@ if ($H.DisableCloudDeliveredProtection) {
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' 'SpynetReporting' 0
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' 'SubmitSamplesConsent' 2
 }
+
+# ---- Release the Default hive (mounted once, above) --------------------------------
+Dismount-DefaultHive
 
 # ---- Drop the idempotency marker so later triggers no-op --------------------------
 try {

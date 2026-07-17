@@ -58,13 +58,19 @@ function Info ($m) { Write-Host  "$(Get-TS)  $m" }
 function Warn ($m) { Write-Warning "$(Get-TS)  $m" }
 
 # Run an installer and return its exit code. Start-Process (a cmdlet, not a bare native call) so its
-# stdout can't leak into a return value, and so we can -Wait + capture the code cleanly.
+# stdout can't leak into a return value. Enforces -TimeoutMin: a hung installer must not block the
+# first-logon task forever - it's killed and reported instead.
 function Invoke-Installer {
     param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutMin = 60)
     if (-not (Test-Path -LiteralPath $FilePath)) { Warn "  installer not found: $FilePath"; return $null }
     try {
         Info "  running: `"$FilePath`" $($Arguments -join ' ')"
-        $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru
+        $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru
+        if (-not $p.WaitForExit($TimeoutMin * 60 * 1000)) {
+            Warn "  TIMED OUT after $TimeoutMin min - killing: $FilePath"
+            try { $p.Kill() } catch { Write-Verbose 'process already gone' }
+            return $null
+        }
         Info "  exit code: $($p.ExitCode)"
         return $p.ExitCode
     } catch { Warn "  installer FAILED ($FilePath): $($_.Exception.Message)"; return $null }
@@ -83,14 +89,15 @@ Info "Running as: $whoami"
 
 # Defaults, overridden by the JSON config if present.
 $cfg = [ordered]@{
-    DebloatAppx    = $true
-    RemoveOneDrive = $true
-    InstallFirefox = $true
-    InstallOffice  = $true
-    OfficeSetup    = 'C:\Windows\Setup\Files\Office\setup.exe'
-    OfficeConfig   = 'C:\Windows\Setup\Files\Office\proplus2024-online.xml'
-    InstallAcrobat = $true
-    AcrobatSource  = ''    # UNC/local path to Acrobat's setup.exe, its folder, or an .iso. Empty => skip.
+    DebloatAppx      = $true
+    RemoveOneDrive   = $true
+    SetNetworkPrivate = $true
+    InstallFirefox   = $true
+    InstallOffice    = $true
+    OfficeSetup      = 'C:\Windows\Setup\Files\Office\setup.exe'
+    OfficeConfig     = 'C:\Windows\Setup\Files\Office\proplus2024.xml'
+    InstallAcrobat   = $true
+    AcrobatSource    = ''    # UNC/local path to Acrobat's setup.exe, its folder, or an .iso. Empty => skip.
 }
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
@@ -154,6 +161,9 @@ if ($cfg.DebloatAppx) {
     # (b) already-installed for all users -> this profile
     foreach ($a in @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue)) {
         $name = $a.Name
+        # Never touch protected Windows SystemApps (PeopleExperienceHost, XboxGameCallableUI, etc.) -
+        # they're shell components that CAN'T be removed per-user and only produce 0x80070032 noise.
+        if ($a.NonRemovable -or ($a.InstallLocation -like '*\SystemApps\*')) { continue }
         if (($removeMatch | Where-Object { $name -like "*$_*" }) -and -not ($keepMatch | Where-Object { $name -like "*$_*" })) {
             try { Remove-AppxPackage -Package $a.PackageFullName -AllUsers -ErrorAction Stop; Info "  removed (installed)  $name" }
             catch { Warn "  remove FAILED (installed)  $name - $($_.Exception.Message)" }
@@ -170,6 +180,28 @@ if ($cfg.DebloatAppx) {
 if ($cfg.RemoveOneDrive) {
     Info '[RemoveOneDrive] uninstalling OneDrive + blocking reinstall'
     Get-Process -Name OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # 24H2/25H2 ships OneDrive as a ~240 MB Win32 PER-MACHINE install (in Program Files) - NOT an
+    # appx and NOT the old System32\OneDriveSetup. Remove it via its REGISTERED uninstaller. Only the
+    # HKLM Uninstall keys matter here - we run as SYSTEM, so HKCU is SYSTEM's profile, not the user's.
+    foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+                        'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        foreach ($k in @(Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+            $p = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+            if ($p.DisplayName -like '*OneDrive*') {
+                $u = if ($p.QuietUninstallString) { $p.QuietUninstallString } else { $p.UninstallString }
+                if ($u) {
+                    if ($u -notmatch '(?i)/uninstall') { $u = "$u /uninstall" }
+                    if ($u -notmatch '(?i)/allusers') { $u = "$u /allusers" }   # only add if not already present
+                    Info "  uninstalling: $($p.DisplayName)"
+                    try { Start-Process -FilePath $env:ComSpec -ArgumentList "/c $u" -Wait -WindowStyle Hidden } catch { Warn "  OneDrive uninstall failed: $($_.Exception.Message)" }
+                }
+            }
+        }
+    }
+    # Any OneDrive appx (some SKUs ship it that way), + the legacy per-user OneDriveSetup.
+    Get-AppxPackage -AllUsers *OneDrive* -ErrorAction SilentlyContinue | ForEach-Object {
+        try { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction Stop } catch { Write-Verbose 'onedrive appx remove failed' }
+    }
     foreach ($ods in @("$env:SystemRoot\System32\OneDriveSetup.exe", "$env:SystemRoot\SysWOW64\OneDriveSetup.exe")) {
         if (Test-Path $ods) { Invoke-Installer -FilePath $ods -Arguments @('/uninstall') -TimeoutMin 10 | Out-Null }
     }
@@ -186,6 +218,29 @@ if ($cfg.RemoveOneDrive) {
 }
 
 # =====================================================================================
+#  2b. Network profile -> Private  (the specialize signature policy didn't stick; do it live)
+# =====================================================================================
+# At first logon the NIC is up and the profile exists, so Set-NetConnectionProfile actually works
+# here (unlike the pre-network specialize pass). Flip every connected profile to Private.
+if ($cfg.SetNetworkPrivate) {
+    Info '[SetNetworkPrivate] setting connected network profiles to Private'
+    try {
+        Get-NetConnectionProfile -ErrorAction Stop | ForEach-Object {
+            Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private -ErrorAction Stop
+            Info "  $($_.Name) -> Private"
+        }
+    } catch { Warn "  could not set network to Private (no active profile yet?): $($_.Exception.Message)" }
+}
+
+# =====================================================================================
+#  2c. WinRE - ensure it's enabled and homed in the dedicated recovery partition
+# =====================================================================================
+# Setup normally auto-relocates WinRE into the de94bba4 recovery partition the answer file creates,
+# but nothing guarantees it. reagentc /enable is idempotent and makes sure WinRE is registered.
+Info '[WinRE] reagentc /enable (belt-and-braces)'
+try { Start-Process -FilePath "$env:SystemRoot\System32\reagentc.exe" -ArgumentList '/enable' -Wait -WindowStyle Hidden } catch { Warn "  reagentc /enable failed: $($_.Exception.Message)" }
+
+# =====================================================================================
 #  3. Firefox - silent install from the baked offline installer
 # =====================================================================================
 if ($cfg.InstallFirefox) {
@@ -196,13 +251,13 @@ if ($cfg.InstallFirefox) {
 }
 
 # =====================================================================================
-#  4. Office LTSC 2024 - ONLINE install via the ODT (downloads from the Microsoft CDN)
+#  4. Office LTSC 2024 - OFFLINE install via the ODT (from the baked-in source)
 # =====================================================================================
-# setup.exe /configure <cfg.xml>. The config has AllowCdnFallback=TRUE and no local source, so ODT
-# downloads Office from the CDN and installs in one step - needs internet at first logon. AUTOACTIVATE
-# in the config handles KMS activation via DNS auto-discovery.
+# setup.exe /configure <cfg.xml>. The baked config has SourcePath=C:\Windows\Setup\Files\Office, so
+# ODT installs from the source baked into the image at build time - NO internet needed (AllowCdnFallback
+# is only a safety net). AUTOACTIVATE in the config handles KMS activation via DNS auto-discovery.
 if ($cfg.InstallOffice) {
-    Info '[InstallOffice] Office LTSC 2024 via ODT (online)'
+    Info '[InstallOffice] Office LTSC 2024 via ODT (offline, from baked source)'
     if ((Test-Path $cfg.OfficeSetup) -and (Test-Path $cfg.OfficeConfig)) {
         $code = Invoke-Installer -FilePath $cfg.OfficeSetup -Arguments @('/configure', $cfg.OfficeConfig) -TimeoutMin 90
         if ($code -eq 0) { Info '  Office install reported success' }

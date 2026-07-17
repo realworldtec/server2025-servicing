@@ -23,6 +23,14 @@ Slipstream_*.log
 Repair_*.log
 DownloadDialog_*.html
 
+# ---- Secrets: the answer file stores the local-admin password in CLEARTEXT ----
+# Keep the REAL answer file out of git; the committed reference is the .sample. Copy the sample to
+# autounattend-Win11.xml, set a real password, and it stays local (and out of the golden USB - the
+# golden is built with Deploy.psd1 IncludeUnattend=$false and the answer file is carried on a
+# separate config ISO built by New-UnattendIso.ps1).
+unattend/autounattend-Win11.xml
+!unattend/autounattend-Win11.xml.sample
+
 # ---- OS / editor cruft ----
 .DS_Store
 Thumbs.db

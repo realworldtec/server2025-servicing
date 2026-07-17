@@ -517,8 +517,10 @@ if (Test-Path $dcfg) {
 # or Microsoft-Windows-Deployment (specialize/auditUser).
 Write-Host ""
 Write-Host "[5/5] Answer files (XML)" -ForegroundColor Cyan
-$xmlFiles = @(Get-ChildItem -Path $Path -Recurse -Filter *.xml -File |
-              Where-Object { $_.FullName -notlike '*\.git\*' })
+# Also validate *.xml.sample templates (an operator copies them to a live .xml, so a malformed
+# sample = a malformed answer file waiting to happen).
+$xmlFiles = @(Get-ChildItem -Path $Path -Recurse -File |
+              Where-Object { $_.Name -match '(?i)\.xml(\.sample)?$' -and $_.FullName -notlike '*\.git\*' })
 $validPasses = @('windowsPE','offlineServicing','generalize','specialize','auditSystem','auditUser','oobeSystem')
 $runOwners   = @('Microsoft-Windows-Setup','Microsoft-Windows-Deployment')
 $xmlScanned  = 0

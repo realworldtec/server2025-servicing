@@ -243,13 +243,13 @@
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>RWT</Name>
+            <Name>Admin</Name>
             <Group>Administrators</Group>
-            <DisplayName>RealWorldTec</DisplayName>
+            <DisplayName>Admin</DisplayName>
             <!-- CHANGE-ME: set a real password. PlainText true stores it in clear in this file;
                  that is fine for a throwaway lab file you keep private, not for anything shared. -->
             <Password>
-              <Value>Pass.Word.2026!</Value>
+              <Value>ChangeMe!2026</Value>
               <PlainText>true</PlainText>
             </Password>
           </LocalAccount>

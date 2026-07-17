@@ -56,7 +56,7 @@
     .\scripts\New-DeployableIso.ps1 -EditionName 'Windows 11 Pro' -IncludeUnattend
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.5.0
     Project : server2025-servicing
     License : MIT
     Run elevated on the build host (ADK + WinPE for oscdimg). PowerShell 5.1+.
@@ -97,6 +97,13 @@ param(
     [string]$OfficeOdtUrl,        # URL to officedeploymenttool_*.exe (downloaded + extracted at build)
     [string]$OfficeConfig,        # ODT config xml; default office\proplus2024.xml
     [switch]$NoOffice,            # don't download / bake / enable Office
+    # Office source CACHE: the downloaded bits are kept here between builds (like the ISO builds keep
+    # their output), so repeated builds the same day DON'T re-hit the CDN. Refreshed only when the
+    # cache is missing, older than -OfficeMaxAgeHours, or -RefreshOffice is passed. Default cache:
+    # <product BasePath>\OfficeCache.
+    [string]$OfficeCache,
+    [int]$OfficeMaxAgeHours = 24, # how stale the cache may be before an automatic refresh
+    [switch]$RefreshOffice,       # force a CDN refresh of the cache this run
     # Acrobat Pro DC: EMBED the ISO into the image; the target mounts + installs it offline.
     [string]$AcrobatIso,          # build-host path to AcrobatDC.iso to bake in; omit => Acrobat skipped
     [switch]$NoAcrobat,
@@ -210,6 +217,8 @@ if (-not $B.ContainsKey('Product')      -and $dp.ContainsKey('Product')      -an
 if (-not $B.ContainsKey('EditionName')  -and $dp.ContainsKey('EditionName')  -and $dp.EditionName)  { $EditionName  = [string]$dp.EditionName }
 if (-not $B.ContainsKey('OfficeConfig') -and $dp.ContainsKey('OfficeConfig') -and $dp.OfficeConfig) { $OfficeConfig = [string]$dp.OfficeConfig }
 if (-not $B.ContainsKey('OfficeOdt')    -and $dp.ContainsKey('OfficeOdt')    -and $dp.OfficeOdt)    { $OfficeOdt    = [string]$dp.OfficeOdt }
+if (-not $B.ContainsKey('OfficeCache')  -and $dp.ContainsKey('OfficeCache')  -and $dp.OfficeCache)  { $OfficeCache  = [string]$dp.OfficeCache }
+if (-not $B.ContainsKey('OfficeMaxAgeHours') -and $dp.ContainsKey('OfficeMaxAgeHours')) { $OfficeMaxAgeHours = [int]$dp.OfficeMaxAgeHours }
 if (-not $B.ContainsKey('FirefoxSetup') -and $dp.ContainsKey('FirefoxSetup') -and $dp.FirefoxSetup) { $FirefoxSetup = [string]$dp.FirefoxSetup }
 if (-not $B.ContainsKey('AcrobatIso')   -and $dp.ContainsKey('AcrobatIso')   -and $dp.AcrobatIso)   { $AcrobatIso   = [string]$dp.AcrobatIso }
 if (-not $B.ContainsKey('IncludeUnattend') -and $dp.ContainsKey('IncludeUnattend')) { $IncludeUnattend = [bool]$dp.IncludeUnattend }
@@ -239,7 +248,10 @@ $BasePath = [string]$P.BasePath
 $Archive  = [string]$P.ArchiveRoot
 $Prefix   = [string]$P.IsoPrefix
 $Label    = [string]$P.Label
-if (-not $WorkDir) { $WorkDir = Join-Path $BasePath 'remaster' }
+if (-not $WorkDir)     { $WorkDir     = Join-Path $BasePath 'remaster' }
+# Persistent Office cache lives OUTSIDE the work dir (which is cleaned each run), so it survives
+# between builds. Default beside the product's other build dirs.
+if (-not $OfficeCache) { $OfficeCache = Join-Path $BasePath 'OfficeCache' }
 
 # ---- Find the newest patched source ISO ---------------------------------------
 if (-not $SourceIso) {
@@ -425,20 +437,42 @@ if ($bakeOffice) {
         $odtSetupLocal = Join-Path $odtDir 'setup.exe'
         if (-not (Test-Path $odtSetupLocal)) { throw "ODT setup.exe not found after extract ($odtSetupLocal). Check -OfficeOdtUrl." }
     }
-    # 2) Temp download config (SourcePath -> scratch), then pull the current Office bits.
-    $officeSrc = Join-Path $TMP 'officesrc'
-    New-Item -ItemType Directory -Path $officeSrc -Force | Out-Null
-    $dlCfg = Join-Path $TMP 'office_download.xml'
-    (Get-Content -LiteralPath $OfficeConfig -Raw).Replace('C:\Windows\Setup\Files\Office', $officeSrc) |
-        Set-Content -LiteralPath $dlCfg -Encoding UTF8
-    Write-Output "$(Get-TS): Office: downloading current bits from the CDN (this is the slow part, ~3 GB)..."
-    $dl = Start-Process -FilePath $odtSetupLocal -ArgumentList @('/download', "`"$dlCfg`"") -Wait -PassThru
-    if (($dl.ExitCode -ne 0) -or (-not (Test-Path (Join-Path $officeSrc 'Office\Data')))) {
-        throw "Office /download failed (exit $($dl.ExitCode)); no Office\Data under $officeSrc. Check internet / the config."
+    # 2) Persistent CACHE + state file (like the ISO ALREADY-BUILT guard): reuse the cached bits and
+    #    DON'T touch the CDN unless the cache is missing, older than -OfficeMaxAgeHours, or
+    #    -RefreshOffice is passed. Six builds in a day => one download, five instant reuses.
+    #    (Even a refresh is cheap: ODT /download is incremental - only the delta transfers.)
+    if (-not (Test-Path $OfficeCache)) { New-Item -ItemType Directory -Path $OfficeCache -Force | Out-Null }
+    $officeState = Join-Path $OfficeCache '.office-state.json'
+    $haveCache   = Test-Path (Join-Path $OfficeCache 'Office\Data')
+    $ageHours    = [double]::PositiveInfinity
+    if (Test-Path $officeState) {
+        try {
+            $st = Get-Content -LiteralPath $officeState -Raw | ConvertFrom-Json
+            if ($st.LastRefreshUtc) { $ageHours = ([DateTime]::UtcNow - [DateTime]$st.LastRefreshUtc).TotalHours }
+        } catch { $ageHours = [double]::PositiveInfinity }
     }
-    $officeSrcReady = $officeSrc
-    $szGB = [math]::Round((Get-ChildItem $officeSrc -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
-    Write-Output "$(Get-TS): Office: source ready ($szGB GB) -> baking into the image"
+    $needRefresh = $RefreshOffice -or (-not $haveCache) -or ($ageHours -gt $OfficeMaxAgeHours)
+    if ($needRefresh) {
+        $why = if ($RefreshOffice) { '-RefreshOffice' } elseif (-not $haveCache) { 'cache empty' } else { "cache {0} h old (> {1})" -f [math]::Round($ageHours,1), $OfficeMaxAgeHours }
+        Write-Output "$(Get-TS): Office: refreshing cache from the CDN ($why). ODT /download is incremental - only the delta transfers."
+        $dlCfg = Join-Path $TMP 'office_download.xml'
+        (Get-Content -LiteralPath $OfficeConfig -Raw).Replace('C:\Windows\Setup\Files\Office', $OfficeCache) |
+            Set-Content -LiteralPath $dlCfg -Encoding UTF8
+        $dl = Start-Process -FilePath $odtSetupLocal -ArgumentList @('/download', "`"$dlCfg`"") -Wait -PassThru
+        if (($dl.ExitCode -ne 0) -or (-not (Test-Path (Join-Path $OfficeCache 'Office\Data')))) {
+            throw "Office /download failed (exit $($dl.ExitCode)); no Office\Data under $OfficeCache. Check internet / the config."
+        }
+        $ver = (Get-ChildItem (Join-Path $OfficeCache 'Office\Data') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+        [pscustomobject]@{ LastRefreshUtc = [DateTime]::UtcNow.ToString('o'); Version = $ver; Product = $Product } |
+            ConvertTo-Json | Set-Content -LiteralPath $officeState -Encoding UTF8
+        Write-Output "$(Get-TS): Office: cache refreshed (build $ver)."
+    } else {
+        $ver = try { (Get-Content -LiteralPath $officeState -Raw | ConvertFrom-Json).Version } catch { 'unknown' }
+        Write-Output "$(Get-TS): Office: reusing cache (build $ver, $([math]::Round($ageHours,1)) h old <= $OfficeMaxAgeHours) - NO CDN call. -RefreshOffice forces one."
+    }
+    $officeSrcReady = $OfficeCache
+    $szGB = [math]::Round((Get-ChildItem $OfficeCache -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum / 1GB, 2)
+    Write-Output "$(Get-TS): Office: source ready ($szGB GB from cache) -> baking into the image"
 }
 
 # Resolve the Acrobat ISO to embed (copied into the image; target mounts it locally at first logon).
@@ -498,6 +532,7 @@ if ((-not $NoHarden) -or $ffLocal) {
             $piConfig = [ordered]@{
                 DebloatAppx    = $cfgDebloat
                 RemoveOneDrive = $cfgOneDrive
+                SetNetworkPrivate = $true
                 InstallFirefox = [bool]$ffLocal
                 InstallOffice  = [bool]$officeSrcReady
                 OfficeSetup    = 'C:\Windows\Setup\Files\Office\setup.exe'
@@ -525,6 +560,13 @@ if ((-not $NoHarden) -or $ffLocal) {
 # ---- 4. Optional: bake the answer file at the ISO root ------------------------
 if ($IncludeUnattend) {
     if (-not (Test-Path $UnattendPath)) { throw "Unattend file not found: $UnattendPath" }
+    # SECURITY: the answer file stores the local-admin password in CLEARTEXT and it's about to be
+    # baked into every copy of this (widely-distributed) USB. Warn loudly if it's still the placeholder.
+    if ((Get-Content -LiteralPath $UnattendPath -Raw) -match 'ChangeMe!2026') {
+        Write-Warning "$(Get-TS): The answer file still has the PLACEHOLDER admin password (ChangeMe!2026),"
+        Write-Warning "$(Get-TS):   which will be baked in CLEARTEXT into this USB. Fine for a throwaway lab; change it"
+        Write-Warning "$(Get-TS):   in $UnattendPath (search: CHANGE-ME) before you use this anywhere real."
+    }
     Copy-Item $UnattendPath (Join-Path $MEDIA 'autounattend.xml') -Force
     Write-Output "$(Get-TS): Baked autounattend.xml at ISO root. THIS ISO WILL WIPE DISK 0 ON BOOT."
 }

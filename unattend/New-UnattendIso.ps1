@@ -45,7 +45,12 @@ function Get-Oscdimg {
 
 $here = $PSScriptRoot
 if (-not $AnswerFile) { $AnswerFile = Join-Path $here 'autounattend-Win11.xml' }
-if (-not (Test-Path $AnswerFile)) { throw "Answer file not found: $AnswerFile" }
+if (-not (Test-Path $AnswerFile)) {
+    throw "Answer file not found: $AnswerFile`n" +
+          "It's .gitignore'd (it holds the cleartext admin password). Create it once:`n" +
+          "    copy `"$here\autounattend-Win11.xml.sample`" `"$AnswerFile`"`n" +
+          "then set a real password in it (search: CHANGE-ME)."
+}
 if (-not $OutputIso)  { $OutputIso  = Join-Path (Split-Path $AnswerFile -Parent) 'Win11-unattend.iso' }
 
 $oscdimg = Get-Oscdimg

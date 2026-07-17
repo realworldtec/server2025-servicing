@@ -32,8 +32,12 @@ Two ways out:
 `unattend/autounattend-Win11.xml` — read the header comment in the file; the essentials:
 
 - **Bypasses** TPM / Secure Boot / RAM / storage / CPU checks (LabConfig, windowsPE pass).
-- **Wipes disk 0** and creates a clean UEFI/GPT layout (EFI + MSR + Windows). **It destroys disk 0
-  with no prompt** — only attach it to a VM you mean to install fresh.
+- **Wipes disk 0** (via a `diskpart` script in windowsPE) and creates a clean UEFI/GPT layout with a
+  **dedicated recovery partition**: EFI 512 MB + MSR 16 MB + Windows (balance) + Recovery ~1 GB (last,
+  hidden, correct type GUID + GPT attributes). Portable to any disk size. **It destroys disk 0 with
+  no prompt** — only attach it to a VM (or machine) you mean to install fresh. *(A plain
+  `DiskConfiguration` can't set the recovery partition's GPT attributes, which is why this uses
+  diskpart; `InstallTo` targets partition 3 = Windows.)*
 - **Selects the edition by NAME** (`/IMAGE/NAME` = `Windows 11 Pro` by default, matched to the Pro
   KMS GVLK `W269N-WFGWX-YVC9B-4J6C9-T83GX`; keep the two on the same edition), *not* by
   index — so it keeps working whether your media is **trimmed** (renumbered) or **full**. This

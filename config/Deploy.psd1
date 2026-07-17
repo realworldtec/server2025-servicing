@@ -23,10 +23,15 @@
     PROFILE FIELDS
       Product          Source product to build FROM - must be a product defined in Products.psd1.
       EditionName      The ONE edition to keep, by exact ImageName (trim-safe).
-      IncludeUnattend  $true bakes the disk-wiping answer file at the ISO root => a fully
-                       unattended installer. *** WIPES DISK 0 ON BOOT. *** This is what a golden
-                       deploy image wants; leave $false only for an image you attach the answer
-                       file to separately.
+      IncludeUnattend  $false (RECOMMENDED, credential-safe) => the answer file is NOT baked into
+                       the golden ISO. You carry it on a separate tiny "config" ISO instead
+                       (build it with .\unattend\New-UnattendIso.ps1), so the CLEARTEXT admin
+                       password is in neither git nor the widely-distributed golden USB. Attach both
+                       ISOs to the target (2nd CD on a VM; a 2nd small USB on hardware). The golden
+                       alone is a non-destructive installer; the config ISO is what makes it wipe +
+                       run unattended.
+                       $true bakes the disk-wiping answer file at the ISO root (password in cleartext
+                       inside the USB) - only for a throwaway lab image you keep private.
 
       Harden           $true injects + runs the privacy hardening (policy at specialize) and the
                        post-install task (first logon).
@@ -41,6 +46,11 @@
                        setup.exe, drop it here). This is the "take the point-in-time setup.exe"
                        choice - we don't re-download the ODT each build. Revisit only if it fails.
       OfficeConfig     '' => office\proplus2024.xml (ProPlus 2024 + Visio). Or a path to your own.
+      OfficeCache      Optional. Where the downloaded Office bits are KEPT between builds so repeated
+                       builds don't re-hit the CDN. '' / omitted => <product BasePath>\OfficeCache.
+      OfficeMaxAgeHours Optional (default 24). Reuse the cache without a CDN call until it's this
+                       old; then the next build refreshes it (incrementally). -RefreshOffice forces
+                       a refresh now.
 
       Acrobat          $true embeds the Acrobat ISO in the image; installed OFFLINE at first logon.
       AcrobatIso       Path to AcrobatDC.iso to embed.
@@ -69,7 +79,9 @@
         'Win11-Pro-Golden' = @{
             Product         = 'Win11-25H2'
             EditionName     = 'Windows 11 Pro'
-            IncludeUnattend = $true                 # WIPES DISK 0 on boot - a deploy image
+            # $false = credential-safe: answer file NOT baked in; carry it on a separate config ISO
+            # (New-UnattendIso.ps1) so the cleartext password stays out of git AND the golden USB.
+            IncludeUnattend = $false
 
             Harden          = $true
 
@@ -92,7 +104,7 @@
         'Win11-Pro-Lean' = @{
             Product         = 'Win11-25H2'
             EditionName     = 'Windows 11 Pro'
-            IncludeUnattend = $true
+            IncludeUnattend = $false   # credential-safe; carry the answer file on a separate config ISO
             Harden          = $true
             Firefox         = $true
             FirefoxSetup    = ''
