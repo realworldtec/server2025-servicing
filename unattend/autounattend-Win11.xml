@@ -7,9 +7,13 @@
       check, so Setup does NOT stop on "This PC can't run Windows 11" (no TPM 2.0, no Secure
       Boot, insufficient RAM). This is the same bypass Rufus applies to USB media.
     * Wipes disk 0 (via diskpart) and lays down a clean UEFI/GPT layout with a DEDICATED recovery
-      partition AND 128 GB left unallocated for a Linux dual-boot: EFI 512 MB + MSR 16 MB +
-      Windows (balance) + Recovery 1026 MB + 128 GB free. Portable to any disk size. See the diskpart
-      comment below to change or remove the 128 GB reserve.
+      partition: EFI 512 MB + MSR 16 MB + Windows (balance) + Recovery 1026 MB. Whether a further
+      128 GB is left UNALLOCATED for a Linux dual-boot is chosen AT BOOT by the Ventoy variable
+      RESERVESPACE (1 = reserve, 0 = Windows takes the whole disk). Portable to any disk size.
+    * Ventoy variable substitution, prompted at boot (names written here WITHOUT their $-delimiters
+      on purpose, so Ventoy only substitutes where they are functional, never in this comment):
+      COMPUTERNAME, ADMINUSER, ADMINDISPLAYNAME, ADMINPWD, RESERVESPACE. See docs/VENTOY.md.
+      Nothing sensitive is stored in this file - the password only exists in Ventoy's in-memory copy.
     * Installs the edition selected BY NAME (default: Windows 11 Pro) - name, not index,
       so this file keeps working whether the media is trimmed (renumbered) or full.
     * Skips OOBE: no Microsoft account, no "let's connect you to a network" - creates a LOCAL
@@ -96,27 +100,42 @@
              <DiskConfiguration> block because pure DiskConfiguration cannot set the recovery
              partition's GPT attributes (hidden + platform-required). RunSynchronous in windowsPE
              runs BEFORE the image is applied, so InstallTo (PartitionID 3) targets the Windows
-             partition this creates. Portable to any disk size: Windows takes the balance, minus a
-             1026 MB recovery partition AND 128 GB left UNALLOCATED at the end for a Linux dual-boot.
-             Layout: 1=EFI(512 MB)  2=MSR(16 MB)  3=Windows(balance)  4=Recovery(1026 MB)  +128 GB free.
+             partition this creates. Portable to any disk size.
 
-             TWO NUMBERS control the Linux reserve (in the diskpart line below):
-               shrink desired=132098 minimum=132096   = 131072 (128 GB) + 1026 (recovery)
-               create partition primary size=1026      = the recovery partition (fixed, so the
-                                                          reserve is what's left over)
-             To change the reserve to N GB:  shrink desired = (N*1024 + 1026), minimum = (N*1024 + 1024).
-             For NO reserve (Windows takes all): shrink desired=1026 minimum=1024, and drop 'size=1026'
-             from the recovery 'create partition primary' so it takes the freed 1 GB.
+             TWO LAYOUTS are written below, and RESERVESPACE picks one at boot (Order 9):
+               A (RESERVESPACE=1)  EFI 512 | MSR 16 | Windows (balance) | Recovery 1026 MB | 128 GB FREE
+                                   shrink desired=132098 minimum=132096  (=131072 for Linux + 1026)
+                                   create partition primary size=1026    (recovery FIXED, so the
+                                                                          128 GB is what's left over)
+               B (RESERVESPACE=0)  EFI 512 | MSR 16 | Windows (balance) | Recovery 1026 MB   (no free)
+                                   shrink desired=1026 minimum=1024
+                                   create partition primary             (recovery takes the freed 1 GB)
+             Recovery sits immediately after C: in both, which is what WinRE servicing wants.
+             To change the reserve to N GB, edit layout A: shrink desired=(N*1024+1026),
+             minimum=(N*1024+1024); leave 'size=1026' alone.
              *** WIPES DISK 0. *** -->
         <RunSynchronousCommand wcm:action="add">
           <Order>7</Order>
-          <Path>cmd /c (echo select disk 0&amp;echo clean&amp;echo convert gpt&amp;echo create partition efi size=512&amp;echo format quick fs=fat32 label=System&amp;echo create partition msr size=16&amp;echo create partition primary&amp;echo shrink desired=132098 minimum=132096&amp;echo format quick fs=ntfs label=Windows&amp;echo create partition primary size=1026&amp;echo format quick fs=ntfs label=Recovery&amp;echo set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"&amp;echo gpt attributes=0x8000000000000001)&gt;X:\diskpart.txt</Path>
-          <Description>Write the diskpart layout script (EFI/MSR/Windows/Recovery)</Description>
+          <Path>cmd /c (echo select disk 0&amp;echo clean&amp;echo convert gpt&amp;echo create partition efi size=512&amp;echo format quick fs=fat32 label=System&amp;echo create partition msr size=16&amp;echo create partition primary&amp;echo shrink desired=132098 minimum=132096&amp;echo format quick fs=ntfs label=Windows&amp;echo create partition primary size=1026&amp;echo format quick fs=ntfs label=Recovery&amp;echo set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"&amp;echo gpt attributes=0x8000000000000001)&gt;X:\dp_reserve.txt</Path>
+          <Description>Write layout A: EFI/MSR/Windows/Recovery + 128 GB reserved (RESERVESPACE=1)</Description>
         </RunSynchronousCommand>
         <RunSynchronousCommand wcm:action="add">
           <Order>8</Order>
-          <Path>cmd /c diskpart /s X:\diskpart.txt</Path>
-          <Description>Apply the layout with a dedicated ~1 GB recovery partition</Description>
+          <Path>cmd /c (echo select disk 0&amp;echo clean&amp;echo convert gpt&amp;echo create partition efi size=512&amp;echo format quick fs=fat32 label=System&amp;echo create partition msr size=16&amp;echo create partition primary&amp;echo shrink desired=1026 minimum=1024&amp;echo format quick fs=ntfs label=Windows&amp;echo create partition primary&amp;echo format quick fs=ntfs label=Recovery&amp;echo set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"&amp;echo gpt attributes=0x8000000000000001)&gt;X:\dp_full.txt</Path>
+          <Description>Write layout B: Windows takes the whole disk, no reserve (RESERVESPACE=0)</Description>
+        </RunSynchronousCommand>
+        <!-- THE SWITCH. Ventoy substitutes the RESERVESPACE variable with what you type at the prompt:
+               1 = reserve 128 GB for Linux   |   0 (or anything else) = Windows takes the whole disk
+             Both layout scripts are written above unconditionally; this line only CHOOSES one, which
+             keeps the single Ventoy variable on its own line (Ventoy allows at most 1 per line) and
+             keeps both layouts explicit and reviewable rather than computed.
+             FAIL-SAFE: if this file is ever booted WITHOUT the Ventoy template, the token is not
+             expanded, the comparison fails, and it falls through to layout B (no reserve) - i.e. the
+             conservative default, never a surprise 128 GB hole. -->
+        <RunSynchronousCommand wcm:action="add">
+          <Order>9</Order>
+          <Path>cmd /c if "$$RESERVESPACE$$"=="1" (diskpart /s X:\dp_reserve.txt) else (diskpart /s X:\dp_full.txt)</Path>
+          <Description>Apply the selected disk layout (1=reserve 128 GB for Linux, 0=whole disk)</Description>
         </RunSynchronousCommand>
       </RunSynchronous>
 
@@ -175,7 +194,12 @@
                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
                xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-      <!-- "*" = a random valid computer name. Set a fixed name if you prefer. -->
+      <!-- Ventoy expands the COMPUTERNAME variable from a boot-time prompt (docs/VENTOY.md), so the machine is
+           NAMED DURING SPECIALIZE - no post-install rename + reboot. Name rules: max 15 chars,
+           letters/digits/hyphens, no spaces.
+           NOTE: if you ever boot this file WITHOUT the Ventoy auto_install template, the token is NOT
+           expanded and would be an invalid name - for non-Ventoy media put "*" (random) or a literal
+           name here instead. -->
       <ComputerName>$$COMPUTERNAME$$</ComputerName>
     </component>
 
@@ -241,11 +265,12 @@
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>%%ADMINUSER%%</Name>
+            <Name>$$ADMINUSER$$</Name>
             <Group>Administrators</Group>
-            <DisplayName>%%ADMINDISPLAYNAME%%</DisplayName>
-            <!-- CHANGE-ME: set a real password. PlainText true stores it in clear in this file;
-                 that is fine for a throwaway lab file you keep private, not for anything shared. -->
+            <DisplayName>$$ADMINDISPLAYNAME$$</DisplayName>
+            <!-- Ventoy prompts for the password at boot and substitutes it into its IN-MEMORY copy of
+                 this file, so NO cleartext credential is stored anywhere - not in git, not on the
+                 stick. PlainText stays true because the value only ever exists in that copy. -->
             <Password>
               <Value>$$ADMINPWD$$</Value>
               <PlainText>true</PlainText>
@@ -263,8 +288,8 @@
       <AutoLogon>
         <Enabled>true</Enabled>
         <LogonCount>1</LogonCount>
-        <Username>Admin</Username>
-        <Password><Value>ChangeMe!2026</Value><PlainText>true</PlainText></Password>
+        <Username>$$ADMINUSER$$</Username>
+        <Password><Value>$$ADMINPWD$$</Value><PlainText>true</PlainText></Password>
       </AutoLogon>
       -->
 
