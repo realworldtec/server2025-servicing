@@ -237,8 +237,16 @@ $cfgOneDrive = if ($dp.ContainsKey('RemoveOneDrive')) { [bool]$dp.RemoveOneDrive
 if (-not $ConfigPath)   { $ConfigPath   = Join-Path $repo 'config\Products.psd1' }
 if (-not $HardenDir)    { $HardenDir    = Join-Path $repo 'harden' }
 if (-not $SshKeySource) { $SshKeySource = Join-Path $repo 'config\ssh\windows' }
-# Enable SSH baking only if a real private key is present in the source (the .sample alone => skip).
-$sshKeyDir = if (Test-Path (Join-Path $SshKeySource 'id_ed25519')) { $SshKeySource } else { $null }
+# Discover key files rather than hardcoding an algorithm: ANY number of pairs, any type
+# (id_rsa / id_ed25519 / id_ecdsa / id_rsa_client ...), plus authorized_keys. '.sample' templates are
+# ignored, so a repo with only placeholders bakes nothing. Enabled only if a real PRIVATE key exists.
+$sshKeyFiles = @()
+if (Test-Path $SshKeySource) {
+    $sshKeyFiles = @(Get-ChildItem -Path $SshKeySource -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike '*.sample' -and ($_.Name -like 'id_*' -or $_.Name -eq 'authorized_keys') })
+}
+$sshPrivCount = @($sshKeyFiles | Where-Object { $_.Name -like 'id_*' -and $_.Name -notlike '*.pub' }).Count
+$sshKeyDir = if ($sshPrivCount -gt 0) { $SshKeySource } else { $null }
 if (-not $UnattendPath) { $UnattendPath = Join-Path $repo 'unattend\autounattend-Win11.xml' }
 if (-not $OfficeConfig) { $OfficeConfig = Join-Path $repo 'office\proplus2024.xml' }
 if (-not (Test-Path $ConfigPath)) { throw "Config not found: $ConfigPath" }
@@ -310,7 +318,7 @@ Write-Output "$(Get-TS): Firefox     : $(if ($NoFirefox) { 'NO' } elseif ($Firef
 Write-Output "$(Get-TS): Office      : $(if ($NoOffice) { 'NO' } elseif ($OfficeOdt -or $OfficeOdtUrl) { 'download current bits + BAKE IN (offline install at first logon)' } else { 'no -OfficeOdt/-OfficeOdtUrl -> not baked' })"
 Write-Output "$(Get-TS): Acrobat     : $(if ($NoAcrobat -or -not $AcrobatIso) { 'NO (no -AcrobatIso)' } else { "EMBED $AcrobatIso (offline install at first logon)" })"
 Write-Output "$(Get-TS): Unattend    : $(if ($IncludeUnattend) { "BAKED AT ROOT (wipes disk 0!) - $UnattendPath" } else { 'not baked (attach separately)' })"
-Write-Output "$(Get-TS): SSH keys    : $(if ($sshKeyDir) { "BAKE from $sshKeyDir (private key in image!) + enable sshd" } else { 'NO (no id_ed25519 in config\ssh\windows)' })"
+Write-Output "$(Get-TS): SSH keys    : $(if ($sshKeyDir) { "BAKE $sshPrivCount private key(s) from $sshKeyDir (PRIVATE KEY IN IMAGE) + enable sshd" } else { "NO (no real id_* private key in $SshKeySource)" })"
 Write-Output "$(Get-TS): Output ISO  : $OutputIso"
 
 # ---- 0. Currency guard: is the chosen source built with the CURRENT LCU? ------
@@ -538,11 +546,8 @@ if ((-not $NoHarden) -or $ffLocal) {
         if ($sshKeyDir) {
             $sshDst = Join-Path $filesDir 'ssh'
             New-Item -ItemType Directory -Path $sshDst -Force | Out-Null
-            foreach ($f in @('authorized_keys', 'id_ed25519', 'id_ed25519.pub')) {
-                $s = Join-Path $sshKeyDir $f
-                if (Test-Path $s) { Copy-Item $s (Join-Path $sshDst $f) -Force }
-            }
-            Write-Output "$(Get-TS): Injected SSH keys -> \Windows\Setup\Files\ssh\ (installed + sshd enabled at first logon)"
+            foreach ($k in $sshKeyFiles) { Copy-Item $k.FullName (Join-Path $sshDst $k.Name) -Force }
+            Write-Output "$(Get-TS): Injected SSH keys -> \Windows\Setup\Files\ssh\ ($($sshKeyFiles.Name -join ', ')) - installed + sshd enabled at first logon"
         }
         # postinstall.config.json: edit-free feature flags Invoke-PostInstall.ps1 reads at first logon.
         if (-not $NoHarden) {
@@ -559,7 +564,9 @@ if ((-not $NoHarden) -or $ffLocal) {
                 InstallAcrobat = [bool]$acrobatLocal
                 AcrobatSource  = $acrobatTarget
                 InstallSshKeys = [bool]$sshKeyDir
-                SshUser        = 'Admin'
+                # Empty on purpose: the admin account name comes from Ventoy's $$ADMINUSER$$ prompt at
+                # BOOT, so it can't be baked here. Invoke-PostInstall auto-detects the logged-on user.
+                SshUser        = ''
                 SshEnableServer = $true
             }
             Set-Content -Path (Join-Path $scriptsDir 'postinstall.config.json') -Value ($piConfig | ConvertTo-Json) -Encoding UTF8

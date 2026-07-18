@@ -7,6 +7,58 @@ All notable changes to this project are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`linux/New-UbuntuUserData.ps1` — generate the Ubuntu answer file from folder contents.** Scans
+  `config/ssh/ubuntu` for `id_*` pairs (a pair = private + `<name>.pub`, any type or descriptive name
+  like `id_rwtgit`), prompts for the key ID, reads the multi-line `authorized_keys`, obtains a SHA-512
+  crypt hash, and writes `linux/user-data` — handling the indentation-sensitive YAML assembly that
+  makes hand-pasting a private key error-prone. `user-data.sample` now uses sentinels (`__KEY_ID__`,
+  `__PRIVATE_KEY__`, `__PUBLIC_KEY__`, `__AUTHORIZED_KEYS__`, `__PASSWORD_HASH__`) and stays valid YAML
+  on its own. The Ventoy tokens are deliberately left untouched (they expand at boot) and the script
+  verifies they survived. Guards: refuses to overwrite without `-Force`, rejects leftover
+  `REPLACE_WITH_YOUR` placeholders, and errors if a PRIVATE key appears in `authorized_keys`.
+  **Password hashing:** PowerShell has no `mkpasswd`/`crypt(3)` equivalent, so the script shells out to
+  `openssl passwd -6` (including the copy bundled with Git for Windows), then WSL, then falls back to
+  pasting — the plaintext never enters a PowerShell variable.
+- **Key samples for both OSes.** `authorized_keys.sample` (two lines: one RSA + one ed25519) for
+  windows and ubuntu, plus `id_rsa`/`id_ed25519` `.sample` pairs. Verified: generated output is valid
+  YAML that round-trips a 4-line private key byte-for-byte and survives an apostrophe in a key comment.
+
+### Fixed
+- **SSH key handling no longer hardcodes an algorithm.** `New-DeployableIso.ps1` gated on
+  `Test-Path .../id_ed25519`, so switching to RSA keys would have **silently skipped SSH entirely** —
+  a clean build with no keys and no error. Both it and `Invoke-PostInstall.ps1` now discover `id_*`
+  files, treat anything not ending `.pub` as private, and handle any number of pairs; every private
+  key gets ACL-locked, not just a hardcoded one.
+- **`.gitignore` would have leaked descriptively-named keys.** Per-algorithm patterns
+  (`id_rsa*`/`id_ed25519*`) do not match names like `id_rwtgit`. The `id_*` catch-all is now documented
+  as load-bearing and must not be removed; the explicit per-type lines are retained as documentation
+  only. Verified in a throwaway repo: `id_rwtgit`, `id_rsa`, `id_ed25519` and `authorized_keys` all
+  ignored in both folders, while every `.sample` and README stays tracked.
+- **Ventoy variable substitution across BOTH answer files.** Per-machine values are now prompted at
+  boot instead of being stored, so the templates carry no credentials at all.
+  - Windows (`autounattend-Win11.xml`): `$$COMPUTERNAME$$` (names the box during **specialize** — no
+    rename + reboot), `$$ADMINUSER$$`, `$$ADMINDISPLAYNAME$$`, `$$ADMINPWD$$` (the cleartext password
+    is gone from the file entirely), and `$$RESERVESPACE$$`.
+  - **`$$RESERVESPACE$$` {0,1} disk-layout switch.** Ventoy allows only one variable per line and the
+    diskpart chain is a single line, so the reserve can't be computed inline. Instead the answer file
+    writes **two complete layout scripts** (`X:\dp_reserve.txt` = 128 GB reserved, `X:\dp_full.txt` =
+    whole disk) and a one-line selector chooses: `if "$$RESERVESPACE$$"=="1" (…) else (…)`. Both
+    layouts stay explicit/reviewable rather than generated, and there's a **fail-safe**: booted without
+    the Ventoy template the token doesn't expand, the compare fails, and it falls through to the
+    no-reserve layout — never a surprise 128 GB hole.
+  - Ubuntu (`linux/user-data`): `$$HOSTNAME$$`, `$$LINUXREALNAME$$`, `$$LINUXUSER$$`. `write_files`
+    `owner:` was dropped (it needs the name twice on one line); ownership now happens in a `runcmd`
+    that substitutes once into a shell var and reuses it. Password stays a crypt hash — Subiquity
+    requires a pre-computed hash, which doesn't prompt sanely.
+  - **`linux/user-data` is now `.gitignore`d** (it holds the private SSH key + password hash), with
+    `linux/user-data.sample` committed as the placeholder-only template — matching the Windows
+    answer-file convention.
+  - Coupling fix: `$$ADMINUSER$$` means the admin account name is unknown at build time, so the SSH
+    key placement no longer hardcodes `Admin`. `New-DeployableIso.ps1` writes `SshUser = ''` and
+    `Invoke-PostInstall.ps1` auto-detects the logged-on user (`Win32_ComputerSystem.UserName`, falling
+    back to the newest real profile folder).
+  - Tokens are written **without** `$` delimiters in all prose comments, so Ventoy only substitutes
+    where they're functional. Verified: one variable per line across both files.
 - **SSH keys on both builds + `docs/VENTOY.md`.** Each machine gets an identity keypair (outbound) in
   the user's `~/.ssh` **and** `authorized_keys` (inbound), with the SSH server enabled. You supply the
   key material; only `.sample` placeholders are committed, real keys are `.gitignore`d.

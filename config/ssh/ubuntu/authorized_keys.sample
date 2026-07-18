@@ -1,10 +1,9 @@
-# INBOUND: public keys allowed to SSH INTO the Windows box. ONE KEY PER LINE.
+# INBOUND: public keys allowed to SSH INTO the Ubuntu box. ONE KEY PER LINE.
 # Copy this file to  authorized_keys  (no .sample) and replace the two lines below with your real
 # public keys. Blank lines and #-comments are ignored by the generator and by sshd.
 #
-# Because the deploy account is an administrator, these are installed at first logon to
-#   %ProgramData%\ssh\administrators_authorized_keys
-# (Windows sshd ignores ~/.ssh/authorized_keys for admins), ACL'd to Administrators + SYSTEM.
+# linux/New-UbuntuUserData.ps1 reads this file and emits every key line into the
+# 'ssh: authorized-keys:' list of the generated user-data.
 # NOTE: only PUBLIC keys belong in this file - never a private key.
 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABREPLACE_WITH_YOUR_RSA_PUBLIC_KEY you@legacy-host
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5REPLACE_WITH_YOUR_ED25519_PUBLIC_KEY you@current-host

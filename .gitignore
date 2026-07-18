@@ -31,13 +31,27 @@ DownloadDialog_*.html
 unattend/autounattend-Win11.xml
 !unattend/autounattend-Win11.xml.sample
 
+# ---- Secrets: the Ubuntu answer file carries the private SSH key (and the password hash) ----
+# Committed reference is user-data.sample; the real user-data stays local and goes on the stick.
+linux/user-data
+!linux/user-data.sample
+
 # ---- Secrets: SSH key material. Only the *.sample templates are committed; real keys never are. ----
+# The two pairs in use are one legacy RSA + one modern ed25519, listed explicitly below for the
+# reader. A trailing '*' already matches '.pub', so no separate .pub rule is needed.
+#
+# *** DO NOT REMOVE THE 'id_*' CATCH-ALL. *** Keys get descriptive names (id_rwtgit, id_backup, ...)
+# that NO per-algorithm rule would match - id_rsa*/id_ed25519* would silently let such a private key
+# be committed. The explicit lines are documentation; 'id_*' is what actually protects you.
 config/ssh/windows/authorized_keys
-config/ssh/windows/id_rwtgit
-config/ssh/windows/id_rwtgit.pub
+config/ssh/windows/id_rsa*
+config/ssh/windows/id_ed25519*
+config/ssh/windows/id_*
 config/ssh/ubuntu/authorized_keys
-config/ssh/ubuntu/id_rwtgit
-config/ssh/ubuntu/id_rwtgit.pub
+config/ssh/ubuntu/id_rsa*
+config/ssh/ubuntu/id_ed25519*
+config/ssh/ubuntu/id_*
+# ...but keep the committed placeholder templates visible. This negation MUST stay last.
 !config/ssh/**/*.sample
 
 # ---- OS / editor cruft ----

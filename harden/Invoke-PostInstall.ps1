@@ -99,7 +99,9 @@ $cfg = [ordered]@{
     InstallAcrobat   = $true
     AcrobatSource    = ''    # UNC/local path to Acrobat's setup.exe, its folder, or an .iso. Empty => skip.
     InstallSshKeys   = $false # gate; New-DeployableIso.ps1 sets $true when keys are staged in the image.
-    SshUser          = 'Admin' # local account whose ~/.ssh gets the OUTBOUND identity keypair. Match the answer file's LocalAccount.
+    SshUser          = ''    # local account whose ~/.ssh gets the OUTBOUND identity keypair. EMPTY =>
+                             # auto-detect (REQUIRED now that the answer file takes the account name
+                             # from Ventoy's $$ADMINUSER$$ prompt - it can't be known at build time).
     SshEnableServer  = $true  # install OpenSSH Server + enable sshd for INBOUND (admin keys go to ProgramData).
 }
 if (Test-Path -LiteralPath $ConfigPath) {
@@ -246,8 +248,9 @@ try { Start-Process -FilePath "$env:SystemRoot\System32\reagentc.exe" -ArgumentL
 # =====================================================================================
 #  2d. SSH - place keys + (optionally) stand up OpenSSH Server
 # =====================================================================================
-# Keys are staged by New-DeployableIso.ps1 at C:\Windows\Setup\Files\ssh\ (authorized_keys,
-# id_ed25519, id_ed25519.pub). We place the OUTBOUND identity keypair in the user's ~/.ssh, and -
+# Keys are staged by New-DeployableIso.ps1 at C:\Windows\Setup\Files\ssh\ - 'authorized_keys' plus any
+# number of id_* pairs of any type (id_rsa, id_ed25519, ...). We place the OUTBOUND identity keys in
+# the user's ~/.ssh, and -
 # because this account is an ADMINISTRATOR - the INBOUND authorized_keys must go to
 # %ProgramData%\ssh\administrators_authorized_keys (Windows sshd IGNORES ~/.ssh for admins) with ACLs
 # restricted to Administrators+SYSTEM, or key auth silently fails. Every step is best-effort (warns,
@@ -258,23 +261,47 @@ if ($cfg.InstallSshKeys) {
     if (-not (Test-Path $sshStage)) {
         Warn "  no staged keys at $sshStage - skipping."
     } else {
+        # Resolve the target account. The answer file now takes the admin name from Ventoy's
+        # $$ADMINUSER$$ prompt, so it is NOT knowable at build time - an empty SshUser means
+        # "work it out here". This task runs AtLogOn, so the logged-on user is the right answer;
+        # fall back to the newest real profile folder.
         $user = [string]$cfg.SshUser
+        if (-not $user) {
+            try {
+                $lu = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName  # DOMAIN\name
+                if ($lu) { $user = $lu.Split('\')[-1]; Info "  auto-detected logged-on user: $user" }
+            } catch { Write-Verbose 'Win32_ComputerSystem.UserName unavailable' }
+        }
+        if (-not $user) {
+            $skip = @('Default', 'Default User', 'Public', 'All Users', 'systemprofile')
+            $cand = Get-ChildItem (Join-Path $env:SystemDrive 'Users') -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $skip -notcontains $_.Name } |
+                    Sort-Object CreationTime -Descending | Select-Object -First 1
+            if ($cand) { $user = $cand.Name; Info "  fell back to newest profile: $user" }
+        }
         # OUTBOUND identity keypair -> the user's ~/.ssh
-        $prof = Join-Path $env:SystemDrive "Users\$user"
-        if (-not (Test-Path $prof)) {
+        $prof = if ($user) { Join-Path $env:SystemDrive "Users\$user" } else { $null }
+        if (-not $user) {
+            Warn '  could not determine the target account - skipping user-side keys.'
+        } elseif (-not (Test-Path $prof)) {
             Warn "  user profile not found: $prof - skipping user-side keys."
         } else {
             try {
                 $dotssh = Join-Path $prof '.ssh'
                 New-Item -ItemType Directory -Path $dotssh -Force | Out-Null
-                foreach ($f in @('id_ed25519', 'id_ed25519.pub', 'authorized_keys')) {
-                    $s = Join-Path $sshStage $f
-                    if (Test-Path $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $dotssh $f) -Force; Info "  placed $f -> $dotssh" }
+                # Copy whatever was staged - any key type, any number of pairs. No algorithm hardcoded.
+                foreach ($src in @(Get-ChildItem -LiteralPath $sshStage -File -ErrorAction SilentlyContinue)) {
+                    Copy-Item -LiteralPath $src.FullName -Destination (Join-Path $dotssh $src.Name) -Force
+                    Info "  placed $($src.Name) -> $dotssh"
                 }
                 # StrictModes-safe ACLs: user + SYSTEM only, no inheritance.
                 & icacls.exe $dotssh /inheritance:r /grant:r "${user}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' 2>&1 | Out-Null
-                $priv = Join-Path $dotssh 'id_ed25519'
-                if (Test-Path $priv) { & icacls.exe $priv /inheritance:r /grant:r "${user}:F" 'SYSTEM:F' 2>&1 | Out-Null }
+                # Lock EVERY private key (id_* that isn't .pub) - ssh refuses a world-readable key.
+                foreach ($pk in @(Get-ChildItem -LiteralPath $dotssh -File -Filter 'id_*' -ErrorAction SilentlyContinue |
+                                  Where-Object { $_.Name -notlike '*.pub' })) {
+                    & icacls.exe $pk.FullName /inheritance:r /grant:r "${user}:F" 'SYSTEM:F' 2>&1 | Out-Null
+                    Info "  locked private key: $($pk.Name)"
+                }
                 Info "  ~/.ssh secured for $user"
             } catch { Warn "  user-side key placement failed: $($_.Exception.Message)" }
         }

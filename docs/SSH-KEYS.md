@@ -54,7 +54,55 @@ To point at a different key folder or account, pass `-SshKeySource <path>` to `N
 
 ---
 
-## Ubuntu — paste into the answer file
+## Generating the SHA-512 password hash on Windows
+
+**PowerShell has no equivalent of `mkpasswd --method=SHA-512`.** That format is glibc's `crypt(3)`
+`$6$` scheme — not a plain SHA-512 digest — and neither PowerShell nor .NET implements it. (Python's
+`crypt` module doesn't help either: it's Unix-only and was removed in 3.13.) So you shell out to
+something that does. In order of convenience:
+
+1. **openssl** — `openssl passwd -6`. If you have **Git for Windows**, you already have it at
+   `C:\Program Files\Git\usr\bin\openssl.exe`. This is the usual winner.
+2. **WSL** — `wsl -e openssl passwd -6`, or `wsl -e mkpasswd -m sha-512` (needs the `whois` package).
+3. **Paste one in** — generate on any Linux box or the Ubuntu live session and paste it.
+
+`New-UbuntuUserData.ps1` tries 1, then 2, and falls back to prompting you to paste. In every case the
+tool prompts for the password itself, so the plaintext never lands in a PowerShell variable, your
+console history, or any file — only the resulting `$6$…` hash does.
+
+## Ubuntu — generate the answer file with the script
+
+Put your key material in `config/ssh/ubuntu/` (all `.gitignore`d — copy each `.sample` to its real
+name). Key files may be named descriptively; the tooling discovers `id_*` pairs rather than assuming
+an algorithm:
+
+```
+config/ssh/ubuntu/
+├── authorized_keys      <- PUBLIC login keys, ONE PER LINE (blank lines and #comments ignored)
+├── id_rwtgit            <- a private key (any name, any type)
+└── id_rwtgit.pub        <- its public half (required — a pair is private + <name>.pub)
+```
+
+Then:
+
+```powershell
+.\linux\New-UbuntuUserData.ps1
+```
+
+It lists the pairs it found, asks which key ID to use (e.g. `id_rwtgit`), reads `authorized_keys`,
+obtains the password hash, and writes `linux/user-data` — doing the indentation-sensitive YAML
+assembly that makes hand-pasting a private key error-prone. Non-interactive form:
+
+```powershell
+.\linux\New-UbuntuUserData.ps1 -KeyId id_rwtgit -PasswordHash '$6$...' -Force
+```
+
+It refuses to overwrite without `-Force`, rejects leftover `REPLACE_WITH_YOUR` placeholders, and
+errors out if a **private** key ever appears in `authorized_keys`. Crucially it leaves the Ventoy
+tokens (`$$HOSTNAME$$`, `$$LINUXREALNAME$$`, `$$LINUXUSER$$`) **untouched** — those are substituted at
+boot, not at generation — and verifies they survived.
+
+## Ubuntu — or paste into the answer file by hand
 
 Ubuntu's keys live **inline** in `linux/user-data` (there's no build step for it — you edit the file
 that goes on the stick). Two places, both already stubbed with placeholders:

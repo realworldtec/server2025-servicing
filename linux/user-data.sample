@@ -1,4 +1,12 @@
 #cloud-config
+# ================================================================================================
+# *** THIS IS THE COMMITTED SAMPLE (user-data.sample). Safe to keep in git. ***
+# It contains ONLY placeholders - no real password hash, no real SSH keys.
+# To use it, once:
+#     cp linux/user-data.sample linux/user-data
+# then fill in the real password hash + SSH keys in linux/user-data (which is .gitignore'd) and copy
+# THAT file to the stick as /ventoy/autoinstall/user-data. See docs/SSH-KEYS.md and docs/VENTOY.md.
+# ================================================================================================
 # =====================================================================================
 # Ubuntu 26.04 LTS - autoinstall (Subiquity/cloud-init) user-data
 # Dual-boot install ALONGSIDE Windows 11 on the Acer Copilot+ (Intel Core Ultra 9 288V,
@@ -64,7 +72,7 @@ autoinstall:
     # ...but that needs 2 variables on one line (not allowed), so split it, and note the plaintext
     # then lands in the installed system's cloud-init logs. The hash below is the safer default.
     # The value below is a NON-WORKING placeholder - REPLACE IT before first use.
-    password: "$6$REPLACE_ME_WITH$a.real.sha512.crypt.hash.from.openssl.passwd.-6.REPLACE"
+    password: "__PASSWORD_HASH__"
 
   # ---- SSH server + INBOUND keys (so you can SSH INTO this box) ----
   ssh:
@@ -72,7 +80,7 @@ autoinstall:
     allow-pw: true                     # keep password login as a fallback; set false to force keys
     authorized-keys:
       # PASTE your PUBLIC key(s) allowed to log in. Replace the placeholder line(s).
-      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5REPLACE_WITH_YOUR_INBOUND_PUBLIC_KEY you@host"
+      - "__AUTHORIZED_KEYS__"
 
   # ---- OUTBOUND identity keypair, written into the user's ~/.ssh on first boot ----
   # This is cloud-init config applied to the INSTALLED system (not the installer). It drops your
@@ -83,21 +91,19 @@ autoinstall:
   # set entirely by the runcmd below, which reuses a shell variable to stay within that rule.
   user-data:
     write_files:
-      - path: /home/$$LINUXUSER$$/.ssh/id_ed25519
+      - path: /home/$$LINUXUSER$$/.ssh/__KEY_ID__
         permissions: '0600'
         defer: true                    # write after the user account exists
         content: |
-          -----BEGIN OPENSSH PRIVATE KEY-----
-          REPLACE_WITH_YOUR_PRIVATE_KEY_BODY_LINES
-          -----END OPENSSH PRIVATE KEY-----
-      - path: /home/$$LINUXUSER$$/.ssh/id_ed25519.pub
+          __PRIVATE_KEY__
+      - path: /home/$$LINUXUSER$$/.ssh/__KEY_ID__.pub
         permissions: '0644'
         defer: true
-        content: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5REPLACE_WITH_YOUR_OUTBOUND_PUBLIC_KEY outbound@ubuntu'
+        content: '__PUBLIC_KEY__'
     runcmd:
       # Guarantees the dir/ownership/perms sshd's StrictModes requires. Ventoy substitutes the ONE
       # variable, then the shell reuses it as $U - that is how we stay at one variable per line.
-      - [ bash, -c, "U=$$LINUXUSER$$; install -d -m 700 -o $U -g $U /home/$U/.ssh; chmod 600 /home/$U/.ssh/id_ed25519; chmod 644 /home/$U/.ssh/id_ed25519.pub; chown -R $U:$U /home/$U/.ssh" ]
+      - [ bash, -c, "U=$$LINUXUSER$$; install -d -m 700 -o $U -g $U /home/$U/.ssh; chmod 600 /home/$U/.ssh/__KEY_ID__; chmod 644 /home/$U/.ssh/__KEY_ID__.pub; chown -R $U:$U /home/$U/.ssh" ]
 
   # ---- network: DHCP is automatic. Use the USB-Ethernet you tested during install;
   #      Wi-Fi during autoinstall is unreliable. Nothing to configure here for DHCP. ----
