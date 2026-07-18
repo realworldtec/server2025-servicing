@@ -1,0 +1,21 @@
+{
+    "//": "Ventoy control file. Copy to the ROOT of the Ventoy partition as /ventoy/ventoy.json.",
+    "//_paths": "All paths are relative to the Ventoy partition root. Edit the ISO filenames to match exactly what you copied onto the stick (image supports fuzzy matching).",
+
+    "auto_install": [
+        {
+            "//": "WINDOWS - the golden ISO. Its template is the autounattend answer file (the one that WIPES disk 0 and reserves 128 GB). Keep it OFF the stick root if you prefer; here it lives under /ventoy/.",
+            "image": "/Win11-25H2-Pro-Golden.iso",
+            "template": "/ventoy/autounattend-Win11.xml",
+            "autosel": 1,
+            "timeout": 10
+        },
+        {
+            "//": "UBUNTU 26.04 - desktop ISO. Template is the cloud-init user-data (meta-data must sit in the same folder). Storage is interactive, so this pauses ONLY on the partition screen.",
+            "image": "/ubuntu-26.04-desktop-amd64.iso",
+            "template": "/ventoy/autoinstall/user-data",
+            "autosel": 1,
+            "timeout": 10
+        }
+    ]
+}
