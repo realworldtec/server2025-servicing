@@ -1,4 +1,0 @@
-# NoCloud meta-data - REQUIRED to sit next to user-data (cloud-init won't start the
-# autoinstall datasource without it). Contents can be minimal; the instance-id just
-# names this deployment. Do not delete this file.
-instance-id: acer-ubuntu-dualboot
