@@ -91,7 +91,9 @@ function New-Sha512CryptHash {
     $wsl = Get-Command 'wsl.exe' -ErrorAction SilentlyContinue
     if ($wsl) {
         Write-Host 'Trying WSL (openssl passwd -6)...' -ForegroundColor Cyan
-        $result = & wsl.exe -e openssl passwd -6
+        # Invoke via the resolved path (not a bare 'wsl.exe' literal) so the captured stdout clearly
+        # lands in $result and never in the function's return stream - same pattern as $ossl above.
+        $result = & $wsl.Source -e openssl passwd -6
         $hash = ($result | Where-Object { $_ -match '^\$6\$' } | Select-Object -First 1)
         if ($hash) { return $hash.Trim() }
         Write-Warning 'WSL did not return a $6$ hash.'

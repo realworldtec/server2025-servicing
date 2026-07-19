@@ -1,0 +1,14 @@
+{
+  "role": "admin",
+  "description": "Server / infrastructure admin (WAC, AD, TrueNAS)",
+  "packages": [
+    { "id": "Microsoft.PowerShell" },
+    { "id": "Microsoft.WindowsTerminal" },
+    { "id": "Git.Git" },
+    { "id": "WinSCP.WinSCP" },
+    { "id": "PuTTY.PuTTY" },
+    { "id": "Microsoft.Sysinternals" },
+    { "id": "WiresharkFoundation.Wireshark" },
+    { "id": "7zip.7zip" }
+  ]
+}

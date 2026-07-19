@@ -59,13 +59,20 @@
 .PARAMETER InstallAnalyzer
     Install PSScriptAnalyzer (CurrentUser) if missing.
 
+.PARAMETER CheckPreReq
+    Also run tests\Test-Prerequisites.ps1 (host tool availability: oscdimg/ADK, elevation, optional
+    tools). Opt-in: stages 1-5 validate the SCRIPTS regardless of host; this extra stage validates the
+    MACHINE. A missing REQUIRED prerequisite fails the gate.
+
 .EXAMPLE
     .\tests\Invoke-QualityGate.ps1
 .EXAMPLE
     .\tests\Invoke-QualityGate.ps1 -InstallAnalyzer
+.EXAMPLE
+    .\tests\Invoke-QualityGate.ps1 -CheckPreReq       # also verify this host can run a build
 
 .NOTES
-    Version : 1.7.0
+    Version : 1.8.0
     Project : server2025-servicing
     Exit code 0 = pass, 1 = fail. Suitable for a git pre-commit hook or CI.
 #>
@@ -73,7 +80,8 @@
 [CmdletBinding()]
 param(
     [string]$Path,
-    [switch]$InstallAnalyzer
+    [switch]$InstallAnalyzer,
+    [switch]$CheckPreReq
 )
 
 if (-not $Path) { $Path = Split-Path $PSScriptRoot -Parent }
@@ -572,6 +580,29 @@ foreach ($x in $xmlFiles) {
 }
 if ($xmlFindings -gt 0) {
     Write-Host ("  {0} finding(s) across {1} XML file(s)." -f $xmlFindings, $xmlScanned) -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
+# (optional) Prerequisites - HOST tool availability (opt-in with -CheckPreReq)
+# ---------------------------------------------------------------------------
+# Stages 1-5 check the SCRIPTS. This one checks the MACHINE: is oscdimg (ADK) installed, are we
+# elevated, etc. It is opt-in because a correct repo on a not-yet-provisioned host is still a correct
+# repo - but when you ask for it, a missing REQUIRED tool fails the gate so you find out before a build.
+if ($CheckPreReq) {
+    Write-Host ""
+    Write-Host "[+] Prerequisites (host)" -ForegroundColor Cyan
+    $preReqScript = Join-Path $PSScriptRoot 'Test-Prerequisites.ps1'
+    if (-not (Test-Path $preReqScript)) {
+        Write-Host "  SKIPPED - Test-Prerequisites.ps1 not found beside the gate." -ForegroundColor Yellow
+    } else {
+        # Take the LAST pipeline value: the prereq script Write-Hosts its table (host stream) and
+        # returns a single boolean, but [-1] is robust even if it ever emits more.
+        $preOk = @(& $preReqScript)[-1]
+        if ($preOk -ne $true) {
+            $failures++
+            Write-Host "  a REQUIRED prerequisite is missing (see the table above)." -ForegroundColor Red
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+{
+  "role": "dev",
+  "description": "Node / web development workstation",
+  "packages": [
+    { "id": "Git.Git" },
+    { "id": "GitHub.cli" },
+    { "id": "OpenJS.NodeJS.LTS" },
+    { "id": "Microsoft.VisualStudioCode" },
+    { "id": "Microsoft.PowerShell" },
+    { "id": "Microsoft.WindowsTerminal" },
+    { "id": "7zip.7zip" },
+    { "id": "Microsoft.VisualStudio.2022.Community", "vsconfig": "vs/dev.vsconfig" }
+  ]
+}

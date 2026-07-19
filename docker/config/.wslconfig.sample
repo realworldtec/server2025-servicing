@@ -1,0 +1,13 @@
+# WSL2 global configuration.
+# Copy this file to  %USERPROFILE%\.wslconfig  (remove the .sample) and Install-Docker.ps1 will apply
+# it. Controls the resources the WSL2 utility VM (Docker's Linux backend) may use. Restart WSL after
+# changing it:  wsl --shutdown
+[wsl2]
+memory=6GB
+processors=4
+swap=2GB
+# localhostForwarding=true
+# networkingMode=mirrored     # Win11 22H2+: mirrors host NICs and REMOVES the separate WSL2 172.x NAT
+                              # adapter, which otherwise picks a dynamic 172.x that can collide with
+                              # production 172.16/172.17. Evaluate first - it changes some localhost/
+                              # port-forward behaviour. See docker/config/README.md.

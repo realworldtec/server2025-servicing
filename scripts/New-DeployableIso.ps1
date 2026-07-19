@@ -232,6 +232,9 @@ if (-not $B.ContainsKey('NoAcrobat')    -and $dp.ContainsKey('Acrobat'))  { $NoA
 # Post-install feature flags (baked into postinstall.config.json). Default $true if the profile is silent.
 $cfgDebloat  = if ($dp.ContainsKey('DebloatAppx'))    { [bool]$dp.DebloatAppx }    else { $true }
 $cfgOneDrive = if ($dp.ContainsKey('RemoveOneDrive')) { [bool]$dp.RemoveOneDrive } else { $true }
+# WSL: OFF by default. When on, post-install enables the WSL + VirtualMachinePlatform features only
+# (no distro) so the box is WSL-ready after a reboot. Kept out of the image unless explicitly asked.
+$cfgEnableWsl = if ($dp.ContainsKey('EnableWsl')) { [bool]$dp.EnableWsl } else { $false }
 
 # ---- Load the product profile -------------------------------------------------
 if (-not $ConfigPath)   { $ConfigPath   = Join-Path $repo 'config\Products.psd1' }
@@ -568,9 +571,10 @@ if ((-not $NoHarden) -or $ffLocal) {
                 # BOOT, so it can't be baked here. Invoke-PostInstall auto-detects the logged-on user.
                 SshUser        = ''
                 SshEnableServer = $true
+                EnableWsl      = $cfgEnableWsl
             }
             Set-Content -Path (Join-Path $scriptsDir 'postinstall.config.json') -Value ($piConfig | ConvertTo-Json) -Encoding UTF8
-            Write-Output "$(Get-TS): Wrote postinstall.config.json (Office=$($piConfig.InstallOffice), Acrobat=$($piConfig.InstallAcrobat), Firefox=$($piConfig.InstallFirefox), Ssh=$($piConfig.InstallSshKeys))"
+            Write-Output "$(Get-TS): Wrote postinstall.config.json (Office=$($piConfig.InstallOffice), Acrobat=$($piConfig.InstallAcrobat), Firefox=$($piConfig.InstallFirefox), Ssh=$($piConfig.InstallSshKeys), Wsl=$($piConfig.EnableWsl))"
         }
     } finally {
         Dismount-WindowsImage -Path $mnt -Save | Out-Null

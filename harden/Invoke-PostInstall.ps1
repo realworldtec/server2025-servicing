@@ -103,6 +103,9 @@ $cfg = [ordered]@{
                              # auto-detect (REQUIRED now that the answer file takes the account name
                              # from Ventoy's $$ADMINUSER$$ prompt - it can't be known at build time).
     SshEnableServer  = $true  # install OpenSSH Server + enable sshd for INBOUND (admin keys go to ProgramData).
+    EnableWsl        = $false # OFF by default. $true enables the WSL + VirtualMachinePlatform FEATURES
+                              # only (no distro); a reboot makes the box WSL-ready. Docker is a separate
+                              # on-demand install (scripts\Install-Docker.ps1) - never baked in.
 }
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
@@ -335,6 +338,24 @@ if ($cfg.InstallSshKeys) {
         try { Remove-Item -LiteralPath $sshStage -Recurse -Force -ErrorAction Stop; Info '  wiped staged keys' }
         catch { Warn "  could not wipe staged keys at $sshStage : $($_.Exception.Message)" }
     }
+}
+
+# =====================================================================================
+#  2e. WSL - enable the FEATURES only (opt-in; off by default)
+# =====================================================================================
+# Enables Microsoft-Windows-Subsystem-Linux + VirtualMachinePlatform via DISM (-NoRestart) - the
+# deterministic, SYSTEM-safe, offline path. This does NOT install a distro or the WSL2 kernel; it just
+# makes the box WSL-ready so a later 'wsl --install -d <distro>' (or Docker Desktop) is quick. A reboot
+# is required for the features to take effect. Off unless Deploy.psd1 sets EnableWsl = $true.
+if ($cfg.EnableWsl) {
+    Info '[WSL] enabling WSL + VirtualMachinePlatform features (no distro; reboot required)'
+    foreach ($feat in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
+        try {
+            Enable-WindowsOptionalFeature -Online -FeatureName $feat -All -NoRestart -ErrorAction Stop | Out-Null
+            Info "  enabled: $feat"
+        } catch { Warn "  could not enable ${feat}: $($_.Exception.Message)" }
+    }
+    Info '  WSL features staged. Reboot, then: wsl --install -d <distro>  (or run Install-Docker.ps1).'
 }
 
 # =====================================================================================

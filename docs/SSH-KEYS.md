@@ -70,6 +70,12 @@ something that does. In order of convenience:
 tool prompts for the password itself, so the plaintext never lands in a PowerShell variable, your
 console history, or any file — only the resulting `$6$…` hash does.
 
+**None of these three is a hard requirement, and WSL is not installed by default.** They are a
+convenience ladder: if you have `openssl` the script uses it; if not, it tries WSL; if neither is
+present it simply asks you to paste a hash you made elsewhere. A build host with no `openssl` and no
+WSL still works. Run `.\tests\Test-Prerequisites.ps1` to see which (if any) are present; see
+`docs/PREREQUISITES.md` for the full required-vs-optional list.
+
 ## Ubuntu — generate the answer file with the script
 
 Put your key material in `config/ssh/ubuntu/` (all `.gitignore`d — copy each `.sample` to its real

@@ -1,0 +1,10 @@
+{
+  "bip": "172.20.0.1/24",
+  "default-address-pools": [
+    { "base": "172.20.0.0/14", "size": 24 }
+  ],
+  "features": { "buildkit": true },
+  "builder": { "gc": { "enabled": true, "defaultKeepStorage": "20GB" } },
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}

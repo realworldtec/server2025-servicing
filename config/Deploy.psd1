@@ -57,6 +57,11 @@
 
       DebloatAppx      $true => post-install removes consumer bloat (KEEP guard protects dev tools).
       RemoveOneDrive   $true => post-install fully uninstalls OneDrive + blocks reinstall.
+      EnableWsl        $false (RECOMMENDED). $true has post-install enable the WSL +
+                       VirtualMachinePlatform FEATURES only (no distro; reboot required). Off keeps the
+                       hardened image minimal and avoids the hypervisor stack (which also affects VMware
+                       Workstation coexistence). Docker is never baked in - use scripts\Install-Docker.ps1
+                       on demand instead.
 
     A field left out of a profile falls back to the script's built-in default. An explicit switch
     on the command line (e.g. -NoOffice) overrides whatever the profile says, for one-off runs.
@@ -97,6 +102,7 @@
 
             DebloatAppx     = $true
             RemoveOneDrive  = $true
+            EnableWsl       = $false                # keep the hardened image minimal; add WSL on demand
         }
 
         # A lean variant: OS + hardening only (no Office/Acrobat), for a small fast image or testing.
@@ -112,6 +118,7 @@
             Acrobat         = $false
             DebloatAppx     = $true
             RemoveOneDrive  = $true
+            EnableWsl       = $false
         }
     }
 }

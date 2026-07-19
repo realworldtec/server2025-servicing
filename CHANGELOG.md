@@ -7,6 +7,71 @@ All notable changes to this project are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`scripts/Setup-VisualStudio.ps1` + updated `docs/VS2022-Community-Setup.md` — scripted VS setup.**
+  Installs VS 2022 Community with workloads pinned by `winget/vs/dev.vsconfig` (via winget
+  `--override --config`), applies git globals with `git config --global`, and imports Tools -> Options
+  from a `.vssettings` (via `devenv /ResetSettings`, located through `vswhere`) - which reproduces
+  almost the entire Options set (theme, preview features, Copilot-badge hide, git UI) in one step. The
+  doc gained: a version note (17.14 is still VS 2022; Options persist across updates), the corrected
+  fact that workloads CAN be pre-selected non-interactively via `--config` (the old note said they
+  couldn't), the three current Copilot components (was two), the `.vssettings` workflow, and the ADMX
+  Group Policy method for durably disabling Copilot across updates. **Not** baked: a guessed VS-Copilot
+  registry key - Microsoft only publishes the ADMX route and the raw value isn't documented, so the doc
+  gives the `reg export` extraction to obtain the verified key before wiring it into the hardening.
+  Sourced from Microsoft Learn (Copilot admin controls, `-ResetSettings`).
+- **`scripts/Install-Packages.ps1` + `winget/` role manifests — on-demand app sets.** Confirms the
+  design boundary: the golden default profile stays minimal (OS + hardening + Office/Acrobat/Firefox);
+  all dev/admin/pentest tooling installs post-deploy via winget so versions are current, not frozen.
+  Role manifests `winget/dev.json`, `admin.json`, `pentest.json` (simple curated JSON, contributable;
+  ids are starting points to verify with `winget search`). Visual Studio Community installs with only
+  the workloads in `winget/vs/dev.vsconfig` (passed via winget `--override --config`), avoiding the
+  default multi-GB set; the script guards against space-containing paths (fragile native-arg quoting)
+  by falling back to default workloads. `-ListOnly` previews without installing. Runs as an elevated
+  USER after logon on purpose (winget is unreliable under SYSTEM, so this is not in the first-logon
+  task). `winget/README.md` documents the format and the VS `.vsconfig` authoring flow.
+- **`EnableWsl` deploy flag (default `$false`).** New `config/Deploy.psd1` field, threaded through
+  `New-DeployableIso.ps1` into `postinstall.config.json`. When `$true`, `Invoke-PostInstall.ps1`
+  enables the `Microsoft-Windows-Subsystem-Linux` + `VirtualMachinePlatform` **features only** (no
+  distro, `-NoRestart`) so a reboot leaves the box WSL-ready. Off by default to keep the hardened image
+  minimal and avoid the hypervisor stack (which also affects VMware Workstation coexistence).
+- **`scripts/Install-Docker.ps1` + `docker/config/` + `docs/DOCKER.md` — Docker on demand.** Docker is
+  never baked into the golden image; this standalone, elevated script (1) ensures the WSL2 backend,
+  (2) installs Docker Desktop via winget (`-WingetId` also accepts Podman/Rancher Desktop), and (3)
+  applies config from `docker/config/` (`.wslconfig`, `daemon.json`, `settings-store.json` — real names
+  only; `*.sample` are templates you copy and edit, contributions welcome). `docs/DOCKER.md` covers the
+  why-not-in-the-image rationale, Docker Desktop licensing, the open-source alternatives, and the
+  relationship to the `EnableWsl` flag. Gate-clean: native `wsl`/`winget` calls are at script scope and
+  piped to `Out-Host`.
+  - `daemon.json.sample` repoints Docker off production `172.16/172.17` into `172.20.0.0/14`
+    (`DOCKER_POOL_BASE`/`SIZE`), setting **both** `bip` (moves `docker0` — the default `172.17.0.0/16`
+    is a direct collision) and `default-address-pools`. README documents the IaC-variable mapping and
+    flags that WSL2's own dynamic `172.x` NAT is a separate conflict best solved with
+    `networkingMode=mirrored`.
+- **`tests/Test-Prerequisites.ps1` + `docs/PREREQUISITES.md` — dependency preflight.** Read-only
+  check that resolves every external tool the toolchain relies on and reports a table before a long
+  build fails partway. Categories: REQUIRED (`oscdimg.exe` from the Windows ADK is the only external
+  must-install; plus PowerShell 5.1+ and admin), BUILT-IN (dism/pnputil/reagentc/diskpart/icacls/reg,
+  always on Windows), OPTIONAL (openssl/WSL for the Ubuntu password hash, dotnet, git — every one
+  guarded, degrades gracefully). Returns `$false` and lists what's missing only when a REQUIRED item
+  is absent. `docs/PREREQUISITES.md` documents the full required-vs-optional matrix and how to install
+  each. Clarified in `docs/SSH-KEYS.md` that **WSL is not required** (it is one rung of the
+  openssl -> WSL -> paste ladder and is not installed by default). Noted the pre-existing duplication
+  of the `oscdimg` resolver across three build scripts as a possible follow-up (not changed, since it
+  touches the core build). The preflight lives in `tests/` beside the gate, and
+  `Invoke-QualityGate.ps1` (v1.8.0) gained an opt-in `-CheckPreReq` stage that runs it: stages 1-5
+  validate the scripts on any host; `-CheckPreReq` additionally validates the machine and fails the
+  gate only if a REQUIRED tool is missing.
+- **`scripts/Get-MachineInventory.ps1` + `docs/INVENTORY.md` — capture the as-delivered machine.**
+  Inventories hardware (system/BIOS/CPU/memory/disks/GPU/network/battery/TPM/Secure Boot), drivers
+  (per-device `Win32_PnPSignedDriver` list plus the `pnputil /enum-drivers` third-party store), apps
+  (Win32 registry uninstall entries, Store/Appx incl. provisioned, and a runtimes/redistributables
+  list), and services/startup/optional-features/capabilities. Writes one JSON file per category plus
+  a single self-contained HTML report, and by default exports the third-party driver store with
+  `pnputil /export-driver` (`-SkipDriverExport` to disable) so the OEM Lunar Lake driver set can be
+  reinjected into the golden image before the Home install is wiped. Read-only apart from the output
+  folder; every section is wrapped so one failure degrades to a warning. PowerShell 5.1, elevated for
+  a full capture. **UNVERIFIED** — no PowerShell in the build environment; structure and gate rules
+  (A/C/F) checked statically, run the quality gate before relying on it.
 - **`linux/New-UbuntuUserData.ps1` — generate the Ubuntu answer file from folder contents.** Scans
   `config/ssh/ubuntu` for `id_*` pairs (a pair = private + `<name>.pub`, any type or descriptive name
   like `id_rwtgit`), prompts for the key ID, reads the multi-line `authorized_keys`, obtains a SHA-512
@@ -24,6 +89,11 @@ All notable changes to this project are documented here. Format follows
   YAML that round-trips a 4-line private key byte-for-byte and survives an apostrophe in a key comment.
 
 ### Fixed
+- **Preflight WSL check was a false positive.** `Get-Command 'wsl.exe'` finds the launcher stub that
+  Windows ships in `System32` even when WSL is not installed, so `Test-Prerequisites.ps1` reported WSL
+  as "present" on hosts that never installed it. Now detects a genuinely usable WSL by checking the
+  per-user `Lxss` registry for at least one registered distribution (what `wsl --list` reads), without
+  spawning `wsl.exe`.
 - **SSH key handling no longer hardcodes an algorithm.** `New-DeployableIso.ps1` gated on
   `Test-Path .../id_ed25519`, so switching to RSA keys would have **silently skipped SSH entirely** —
   a clean build with no keys and no error. Both it and `Invoke-PostInstall.ps1` now discover `id_*`
